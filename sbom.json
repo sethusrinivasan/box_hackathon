@@ -1,10 +1,10 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:e19d89cb-10d5-554f-be0c-07d21adc69f6",
+  "serialNumber": "urn:uuid:203a6901-d709-51c0-99a3-bc06cec0b166",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-10-17T16:03:14.083463+00:00",
+    "timestamp": "2026-10-17T17:38:27.915943+00:00",
     "tools": [
       {
         "vendor": "Reality Check",
@@ -41,12 +41,12 @@
     {
       "type": "library",
       "name": "boxsdk",
-      "version": "3.9.0",
-      "purl": "pkg:pypi/boxsdk@3.9.0",
+      "version": "3.14.0",
+      "purl": "pkg:pypi/boxsdk@3.14.0",
       "properties": [
         {
           "name": "constraint",
-          "value": ">=3.9.0"
+          "value": "==3.14.0"
         }
       ]
     }
