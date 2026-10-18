@@ -166,6 +166,31 @@ class ObservabilityStack(Stack):
             ),
         )
 
+        # Row 4 — hourly canary (synthetic end-to-end probe of the live demo).
+        dashboard.add_widgets(
+            self._canary_status_widget(),
+            self._canary_latency_widget(),
+            self._canary_checks_widget(),
+        )
+        dashboard.add_widgets(
+            self._caption(
+                "**Canary success / failure (hourly)**",
+                "A scheduled probe exercises the live demo end-to-end every hour. "
+                "Any failure means the public endpoint is broken even if Lambda "
+                "metrics look fine.",
+            ),
+            self._caption(
+                "**Canary latency by endpoint (p90)**",
+                "Round-trip time the probe sees for /healthz, /, /api/run, and "
+                "/report.pdf. Rising latency is an early warning.",
+            ),
+            self._caption(
+                "**Canary checks pass/fail by endpoint**",
+                "Per-endpoint pass/fail so a failure points straight at the "
+                "broken route.",
+            ),
+        )
+
         CfnOutput(
             self,
             "DashboardURL",
@@ -360,6 +385,50 @@ class ObservabilityStack(Stack):
                                 label="AMBER", color=AMBER),
                 self._rc_metric("WorkflowFinalRisk", dims={"risk": "GREEN"},
                                 label="GREEN", color=GREEN),
+            ],
+            left_y_axis=cw.YAxisProps(min=0),
+        )
+
+    # ------------------------------------------------------------------ #
+    # Row 4 — hourly canary
+    # ------------------------------------------------------------------ #
+    def _canary_status_widget(self) -> cw.GraphWidget:
+        return cw.GraphWidget(
+            title="Canary success / failure (hourly)",
+            width=8,
+            height=5,
+            stacked=True,
+            left=[
+                self._rc_metric("CanarySuccess", label="success", color=GREEN),
+                self._rc_metric("CanaryFailure", label="failure", color=RED),
+            ],
+            left_y_axis=cw.YAxisProps(min=0),
+        )
+
+    def _canary_latency_widget(self) -> cw.GraphWidget:
+        endpoints = ["healthz", "landing", "review", "report_pdf"]
+        return cw.GraphWidget(
+            title="Canary latency by endpoint (p90, ms)",
+            width=8,
+            height=5,
+            left=[
+                self._rc_metric("CanaryLatencyMs", dims={"endpoint": e},
+                                stat="p90", label=e)
+                for e in endpoints
+            ],
+            left_y_axis=cw.YAxisProps(min=0, label="ms"),
+        )
+
+    def _canary_checks_widget(self) -> cw.GraphWidget:
+        return cw.GraphWidget(
+            title="Canary checks pass / fail",
+            width=8,
+            height=5,
+            left=[
+                self._rc_metric("CanaryCheck", dims={"result": "pass"},
+                                label="pass", color=GREEN),
+                self._rc_metric("CanaryCheck", dims={"result": "fail"},
+                                label="fail", color=RED),
             ],
             left_y_axis=cw.YAxisProps(min=0),
         )

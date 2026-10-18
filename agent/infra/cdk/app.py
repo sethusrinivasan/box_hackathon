@@ -25,8 +25,17 @@ import os
 
 import aws_cdk as cdk
 
+from reality_check_infra.canary_stack import CanaryStack
 from reality_check_infra.observability_stack import ObservabilityStack
 from reality_check_infra.web_demo_stack import WebDemoStack
+
+# The cost tracker is developed in a parallel session; import it optionally so
+# this app stays synth-able even if that module hasn't been committed yet
+# (two sessions share one app.py). When present, its stack is added below.
+try:
+    from reality_check_infra.cost_tracker_stack import CostTrackerStack
+except ImportError:
+    CostTrackerStack = None
 
 app = cdk.App()
 
@@ -34,6 +43,10 @@ function_name = app.node.try_get_context("functionName") or "reality-check-web-d
 dashboard_name = app.node.try_get_context("dashboardName") or "RealityCheck"
 alarm_email = app.node.try_get_context("alarmEmail")  # optional
 web_concurrency = int(app.node.try_get_context("webConcurrency") or 5)
+# Live demo URL the hourly canary probes. Defaults to the deployed Function URL;
+# override with -c demoUrl=... for a different deployment.
+demo_url = (app.node.try_get_context("demoUrl")
+            or "https://2c5gs4u2lsxjzi66dbxbr7iuzu0xhila.lambda-url.us-east-2.on.aws/")
 
 env = cdk.Environment(
     account=os.environ.get("CDK_DEFAULT_ACCOUNT"),
@@ -64,5 +77,28 @@ ObservabilityStack(
     env=env,
     description="Reality Check observability: CloudWatch dashboard + baseline alarms.",
 )
+
+# Hourly synthetic canary that probes the live demo end-to-end and emits
+# Canary* metrics into the RealityCheck namespace for the dashboard.
+CanaryStack(
+    app,
+    "RealityCheckCanary",
+    demo_url=demo_url,
+    env=env,
+    description="Reality Check hourly canary: EventBridge schedule + probe Lambda.",
+)
+
+# Daily holistic cost tracking into Aurora Serverless v2 Postgres created with
+# EXPRESS configuration (IAM-auth by default, internet access gateway so no NAT
+# and no VPC, single serverless writer, native PG, no stored secrets).
+# Added only when the module is present (see the optional import above).
+if CostTrackerStack is not None:
+    CostTrackerStack(
+        app,
+        "RealityCheckCostTracker",
+        env=env,
+        description=("Reality Check daily cost tracker: Aurora Serverless v2 "
+                     "PostgreSQL 18 (min 0 ACU) + collector Lambda via IAM DB auth."),
+    )
 
 app.synth()
