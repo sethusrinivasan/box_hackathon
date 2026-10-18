@@ -67,7 +67,7 @@ class ObservabilityStack(Stack):
             alarm_topic.add_subscription(subs.EmailSubscription(alarm_email))
 
         # --- Baseline operational alarms --------------------------------
-        self._build_alarms(lambda_dims, alarm_topic)
+        self._build_alarms(lambda_dims, alarm_topic, dashboard_name)
 
         # --- Dashboard ---------------------------------------------------
         dashboard = cw.Dashboard(
@@ -437,7 +437,8 @@ class ObservabilityStack(Stack):
     # Alarms
     # ------------------------------------------------------------------ #
     def _build_alarms(self, lambda_dims: dict,
-                      topic: Optional[sns.Topic]) -> None:
+                      topic: Optional[sns.Topic],
+                      dashboard_name: str = "RealityCheck") -> None:
         alarms: List[cw.Alarm] = []
 
         alarms.append(
@@ -476,6 +477,30 @@ class ObservabilityStack(Stack):
                 evaluation_periods=1,
                 comparison_operator=cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
                 treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
+            )
+        )
+
+        # The hourly canary probes the live demo end-to-end. Any failed run means
+        # the public endpoint is broken even if raw Lambda metrics look fine, so
+        # alarm on the first failure. The metric is evaluated over a 1h period to
+        # match the canary cadence; a run that never happened (missing data) is
+        # surfaced as breaching so a silent/stopped canary also alarms.
+        alarms.append(
+            cw.Alarm(
+                self,
+                "CanaryFailureAlarm",
+                alarm_name=f"{dashboard_name}-CanaryFailure",
+                alarm_description=(
+                    "The hourly web-demo canary reported a failed run (an "
+                    "end-to-end check against the live Function URL failed), or "
+                    "no canary run was observed in the last hour."
+                ),
+                metric=self._rc_metric("CanaryFailure", stat="Sum").with_(
+                    period=Duration.hours(1)),
+                threshold=1,
+                evaluation_periods=1,
+                comparison_operator=cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+                treat_missing_data=cw.TreatMissingData.BREACHING,
             )
         )
 
