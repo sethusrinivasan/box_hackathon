@@ -3,8 +3,9 @@ ObservabilityStack — CloudWatch dashboard + baseline alarms for Reality Check.
 
 Visualizes three things operations actually watches:
   1. Lambda service health (invocations, errors, throttles, duration, concurrency)
-  2. External dependencies (Box AI + Bedrock usage, failures, token spend)
-  3. The agentic-workflow KPIs (outcomes, human-in-the-loop rate, risk mix)
+  2. Review throughput + the Bedrock dependency (reviews, claims, invokes, tokens)
+  3. Review KPIs (results by outcome, risks flagged, claim-severity mix)
+  4. A synthetic hourly canary probing the live demo end-to-end
 
 Custom metrics live in the "RealityCheck" namespace and are emitted as EMF by
 box/telemetry.py when the Lambda runs with EMIT_METRICS=true. AWS/Lambda metrics
@@ -85,8 +86,9 @@ class ObservabilityStack(Stack):
                     f"custom metrics namespace **`{NAMESPACE}`** "
                     "(emitted when the Lambda runs with `EMIT_METRICS=true`).\n\n"
                     "**Row 1 - Service health** (is the function healthy?) &nbsp;|&nbsp; "
-                    "**Row 2 - Dependencies** (Box AI + Bedrock usage/cost) &nbsp;|&nbsp; "
-                    "**Row 3 - Workflow KPIs** (what the agent decided)."
+                    "**Row 2 - Throughput & Bedrock** (reviews run + model usage/cost) &nbsp;|&nbsp; "
+                    "**Row 3 - Review KPIs** (what the agent concluded) &nbsp;|&nbsp; "
+                    "**Row 4 - Canary** (is the live demo up?)."
                 ),
                 width=24,
                 height=3,
@@ -118,7 +120,7 @@ class ObservabilityStack(Stack):
             ),
         )
 
-        # Row 2 — external dependencies
+        # Row 2 — review throughput + Bedrock dependency
         dashboard.add_widgets(
             self._actions_widget(),
             self._box_ai_widget(),
@@ -126,23 +128,23 @@ class ObservabilityStack(Stack):
         )
         dashboard.add_widgets(
             self._caption(
-                "**Actions invoked (by action)**",
-                "Which agent capabilities are used, and how often. The product's "
-                "usage mix at a glance.",
+                "**Contract reviews run**",
+                "Review volume vs. no-match runs (contract name couldn't be "
+                "resolved to a source doc). Rising no-match = ingestion drift.",
             ),
             self._caption(
-                "**Box AI calls & extraction failures**",
-                "Box AI call volume (latency/cost driver) vs. parse failures. "
-                "Rising failures mean history metadata is silently degrading.",
+                "**Claims reviewed**",
+                "How many individual claims were checked across all reviews. "
+                "The per-run workload driver for latency and token spend.",
             ),
             self._caption(
                 "**Bedrock invokes / failures / tokens**",
-                "Bedrock usage for the research brief. Failures = degraded "
-                "narrative; tokens (right axis) track model spend.",
+                "Bedrock usage for the LLM review. Failures = degraded "
+                "analysis; tokens (right axis) track model spend.",
             ),
         )
 
-        # Row 3 — workflow KPIs
+        # Row 3 — review KPIs
         dashboard.add_widgets(
             self._workflow_outcome_widget(),
             self._human_loop_widget(),
@@ -150,19 +152,19 @@ class ObservabilityStack(Stack):
         )
         dashboard.add_widgets(
             self._caption(
-                "**Workflow runs by outcome**",
-                "Converged (auto-approved) vs. needs-human vs. hit max "
-                "iterations. The core throughput signal.",
+                "**Claims by result**",
+                "No-risk vs. risk-identified vs. no-source-found, stacked. The "
+                "core outcome signal for what the agent concluded.",
             ),
             self._caption(
-                "**Human-in-the-loop & avg iterations**",
-                "How often a deal needs a human, and how many revise passes it "
-                "takes. Rising values = more manual load.",
+                "**Risks flagged**",
+                "Count of claims the agent flagged as risk-identified. The "
+                "human-review workload: every flag is a deal a person must read.",
             ),
             self._caption(
-                "**Final risk mix (RED/AMBER/GREEN)**",
-                "Risk tier of finalized deals. A RED-heavy mix signals the "
-                "pipeline is clearing risky contracts.",
+                "**Claim severity mix (High/Medium/None)**",
+                "Severity tier of reviewed claims. A High-heavy mix means the "
+                "pipeline is surfacing materially risky terms.",
             ),
         )
 
@@ -287,34 +289,27 @@ class ObservabilityStack(Stack):
         )
 
     # ------------------------------------------------------------------ #
-    # Row 2 — external dependencies
+    # Row 2 — review throughput + Bedrock dependency
     # ------------------------------------------------------------------ #
     def _actions_widget(self) -> cw.GraphWidget:
-        actions = [
-            "analyze-and-report", "run-workflow", "resume-workflow",
-            "grade-deal", "portfolio-radar",
-        ]
         return cw.GraphWidget(
-            title="Actions invoked (by action)",
+            title="Contract reviews run",
             width=8,
             height=5,
-            stacked=True,
             left=[
-                self._rc_metric("ActionInvoked", dims={"action": a}, label=a)
-                for a in actions
+                self._rc_metric("ReviewRun", label="reviews", color=BLUE),
+                self._rc_metric("ReviewNoMatch", label="no-match", color=AMBER),
             ],
             left_y_axis=cw.YAxisProps(min=0),
         )
 
     def _box_ai_widget(self) -> cw.GraphWidget:
         return cw.GraphWidget(
-            title="Box AI calls & extraction failures",
+            title="Claims reviewed",
             width=8,
             height=5,
             left=[
-                self._rc_metric("BoxAiCall", label="Box AI calls", color=GREEN),
-                self._rc_metric("BoxExtractParseFailure",
-                                label="extract parse failures", color=RED),
+                self._rc_metric("ReviewClaims", stat="Sum", label="claims", color=BLUE),
             ],
             left_y_axis=cw.YAxisProps(min=0),
         )
@@ -337,54 +332,50 @@ class ObservabilityStack(Stack):
         )
 
     # ------------------------------------------------------------------ #
-    # Row 3 — workflow KPIs
+    # Row 3 — review KPIs
     # ------------------------------------------------------------------ #
     def _workflow_outcome_widget(self) -> cw.GraphWidget:
         return cw.GraphWidget(
-            title="Workflow runs by outcome",
+            title="Claims by result",
             width=8,
             height=5,
             stacked=True,
             left=[
-                self._rc_metric("WorkflowRun", dims={"status": "converged"},
-                                label="converged", color=GREEN),
-                self._rc_metric("WorkflowRun", dims={"status": "needs_human_approval"},
-                                label="needs-human", color=AMBER),
-                self._rc_metric("WorkflowRun", dims={"status": "max_iterations_reached"},
-                                label="max-iterations", color=RED),
+                self._rc_metric("ReviewResult", dims={"result": "No risk"},
+                                label="no risk", color=GREEN),
+                self._rc_metric("ReviewResult", dims={"result": "Risk identified"},
+                                label="risk identified", color=RED),
+                self._rc_metric("ReviewResult", dims={"result": "No source found"},
+                                label="no source found", color=AMBER),
             ],
             left_y_axis=cw.YAxisProps(min=0),
         )
 
     def _human_loop_widget(self) -> cw.GraphWidget:
         return cw.GraphWidget(
-            title="Human-in-the-loop & avg iterations",
+            title="Risks found vs clean reviews",
             width=8,
             height=5,
             left=[
-                self._rc_metric("WorkflowNeedsHuman", label="needs-human", color=AMBER),
-            ],
-            right=[
-                self._rc_metric("WorkflowIterations", stat="Average",
-                                label="avg iterations", color=BLUE),
+                self._rc_metric("ReviewResult", dims={"result": "Risk identified"},
+                                stat="Sum", label="risks flagged", color=RED),
             ],
             left_y_axis=cw.YAxisProps(min=0),
-            right_y_axis=cw.YAxisProps(min=0, label="iterations"),
         )
 
     def _risk_mix_widget(self) -> cw.GraphWidget:
         return cw.GraphWidget(
-            title="Final risk mix",
+            title="Claim severity mix",
             width=8,
             height=5,
             stacked=True,
             left=[
-                self._rc_metric("WorkflowFinalRisk", dims={"risk": "RED"},
-                                label="RED", color=RED),
-                self._rc_metric("WorkflowFinalRisk", dims={"risk": "AMBER"},
-                                label="AMBER", color=AMBER),
-                self._rc_metric("WorkflowFinalRisk", dims={"risk": "GREEN"},
-                                label="GREEN", color=GREEN),
+                self._rc_metric("ReviewSeverity", dims={"severity": "High"},
+                                label="High", color=RED),
+                self._rc_metric("ReviewSeverity", dims={"severity": "Medium"},
+                                label="Medium", color=AMBER),
+                self._rc_metric("ReviewSeverity", dims={"severity": "None"},
+                                label="None", color=GREEN),
             ],
             left_y_axis=cw.YAxisProps(min=0),
         )
@@ -471,7 +462,7 @@ class ObservabilityStack(Stack):
             cw.Alarm(
                 self,
                 "BedrockInvokeFailuresAlarm",
-                alarm_description="Bedrock model invocations are failing (research brief degraded).",
+                alarm_description="Bedrock model invocations are failing (LLM review degraded).",
                 metric=self._rc_metric("BedrockInvokeFailure"),
                 threshold=3,
                 evaluation_periods=1,
