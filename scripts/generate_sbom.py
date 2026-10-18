@@ -21,7 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-REQUIREMENTS = REPO_ROOT / "agent" / "lambda" / "requirements.txt"
+# Runtime deps moved to the repo root in the post-restructure layout.
+REQUIREMENTS = REPO_ROOT / "requirements.txt"
 OUTPUT = REPO_ROOT / "sbom.json"
 
 # name (op) version  e.g.  boto3>=1.34.0 , boxsdk==3.9.0

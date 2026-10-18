@@ -67,7 +67,7 @@ jobs:
         # fails the job so dependency risk is visible on every push/PR.
         # (No --strict: with ">=" ranges and no lockfile, --strict fails on
         #  resolution/metadata gaps rather than real vulnerabilities.)
-        run: pip-audit -r agent/lambda/requirements.txt
+        run: pip-audit -r requirements.txt
 
   gitleaks:
     name: Gitleaks (secret scanning)
