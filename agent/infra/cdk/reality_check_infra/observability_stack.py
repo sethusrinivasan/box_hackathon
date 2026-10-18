@@ -67,7 +67,7 @@ class ObservabilityStack(Stack):
             alarm_topic.add_subscription(subs.EmailSubscription(alarm_email))
 
         # --- Baseline operational alarms --------------------------------
-        self._build_alarms(lambda_dims, alarm_topic)
+        self._build_alarms(lambda_dims, alarm_topic, dashboard_name)
 
         # --- Dashboard ---------------------------------------------------
         dashboard = cw.Dashboard(
@@ -163,6 +163,31 @@ class ObservabilityStack(Stack):
                 "**Final risk mix (RED/AMBER/GREEN)**",
                 "Risk tier of finalized deals. A RED-heavy mix signals the "
                 "pipeline is clearing risky contracts.",
+            ),
+        )
+
+        # Row 4 — hourly canary (synthetic end-to-end probe of the live demo).
+        dashboard.add_widgets(
+            self._canary_status_widget(),
+            self._canary_latency_widget(),
+            self._canary_checks_widget(),
+        )
+        dashboard.add_widgets(
+            self._caption(
+                "**Canary success / failure (hourly)**",
+                "A scheduled probe exercises the live demo end-to-end every hour. "
+                "Any failure means the public endpoint is broken even if Lambda "
+                "metrics look fine.",
+            ),
+            self._caption(
+                "**Canary latency by endpoint (p90)**",
+                "Round-trip time the probe sees for /healthz, /, /api/run, and "
+                "/report.pdf. Rising latency is an early warning.",
+            ),
+            self._caption(
+                "**Canary checks pass/fail by endpoint**",
+                "Per-endpoint pass/fail so a failure points straight at the "
+                "broken route.",
             ),
         )
 
@@ -365,10 +390,55 @@ class ObservabilityStack(Stack):
         )
 
     # ------------------------------------------------------------------ #
+    # Row 4 — hourly canary
+    # ------------------------------------------------------------------ #
+    def _canary_status_widget(self) -> cw.GraphWidget:
+        return cw.GraphWidget(
+            title="Canary success / failure (hourly)",
+            width=8,
+            height=5,
+            stacked=True,
+            left=[
+                self._rc_metric("CanarySuccess", label="success", color=GREEN),
+                self._rc_metric("CanaryFailure", label="failure", color=RED),
+            ],
+            left_y_axis=cw.YAxisProps(min=0),
+        )
+
+    def _canary_latency_widget(self) -> cw.GraphWidget:
+        endpoints = ["healthz", "landing", "review", "report_pdf"]
+        return cw.GraphWidget(
+            title="Canary latency by endpoint (p90, ms)",
+            width=8,
+            height=5,
+            left=[
+                self._rc_metric("CanaryLatencyMs", dims={"endpoint": e},
+                                stat="p90", label=e)
+                for e in endpoints
+            ],
+            left_y_axis=cw.YAxisProps(min=0, label="ms"),
+        )
+
+    def _canary_checks_widget(self) -> cw.GraphWidget:
+        return cw.GraphWidget(
+            title="Canary checks pass / fail",
+            width=8,
+            height=5,
+            left=[
+                self._rc_metric("CanaryCheck", dims={"result": "pass"},
+                                label="pass", color=GREEN),
+                self._rc_metric("CanaryCheck", dims={"result": "fail"},
+                                label="fail", color=RED),
+            ],
+            left_y_axis=cw.YAxisProps(min=0),
+        )
+
+    # ------------------------------------------------------------------ #
     # Alarms
     # ------------------------------------------------------------------ #
     def _build_alarms(self, lambda_dims: dict,
-                      topic: Optional[sns.Topic]) -> None:
+                      topic: Optional[sns.Topic],
+                      dashboard_name: str = "RealityCheck") -> None:
         alarms: List[cw.Alarm] = []
 
         alarms.append(
@@ -407,6 +477,30 @@ class ObservabilityStack(Stack):
                 evaluation_periods=1,
                 comparison_operator=cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
                 treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
+            )
+        )
+
+        # The hourly canary probes the live demo end-to-end. Any failed run means
+        # the public endpoint is broken even if raw Lambda metrics look fine, so
+        # alarm on the first failure. The metric is evaluated over a 1h period to
+        # match the canary cadence; a run that never happened (missing data) is
+        # surfaced as breaching so a silent/stopped canary also alarms.
+        alarms.append(
+            cw.Alarm(
+                self,
+                "CanaryFailureAlarm",
+                alarm_name=f"{dashboard_name}-CanaryFailure",
+                alarm_description=(
+                    "The hourly web-demo canary reported a failed run (an "
+                    "end-to-end check against the live Function URL failed), or "
+                    "no canary run was observed in the last hour."
+                ),
+                metric=self._rc_metric("CanaryFailure", stat="Sum").with_(
+                    period=Duration.hours(1)),
+                threshold=1,
+                evaluation_periods=1,
+                comparison_operator=cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+                treat_missing_data=cw.TreatMissingData.BREACHING,
             )
         )
 

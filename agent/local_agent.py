@@ -17,7 +17,11 @@ from minipdf import PdfDoc  # noqa: E402
 
 envload.load_env()
 
-MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-6")
+# Frugal default: Amazon Nova Lite is one of the cheapest Bedrock models
+# (~$0.06 / $0.24 per 1M input/output tokens) and handles this structured
+# claim-extraction task well. Override BEDROCK_MODEL_ID for a stronger (pricier)
+# model like Claude Sonnet if a deployment needs it.
+MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.amazon.nova-lite-v1:0")
 REGION = os.environ.get("AWS_REGION", "us-east-1")
 
 RESULTS = ["No risk", "Risk identified", "No source found"]
