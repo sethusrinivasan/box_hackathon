@@ -177,6 +177,17 @@ def _run_review(contract_key: str, *, live: bool = False) -> dict:
 # ---------------------------------------------------------------------------
 # HTTP layer (Lambda Function URL, payload format 2.0)
 # ---------------------------------------------------------------------------
+def _page_html() -> str:
+    """Render the demo page, injecting the 'Cloud cost' link when the cost web
+    view URL is configured (env COST_WEB_URL set by deploy). If unset, the link
+    is omitted so the page still works standalone."""
+    cost_url = os.environ.get("COST_WEB_URL", "").strip()
+    link = (f'<a href="{cost_url}">Cloud cost &rarr;</a> '
+            "— holistic daily AWS spend for this demo account."
+            if cost_url else "")
+    return PAGE_HTML.replace("{{COST_LINK}}", link)
+
+
 def _json(status, body):
     return {"statusCode": status,
             "headers": {"content-type": "application/json", "cache-control": "no-store"},
@@ -225,7 +236,7 @@ def lambda_handler(event, context=None):
     try:
         if path in ("/", "/index.html") and method == "GET":
             status = 200
-            return _html(200, PAGE_HTML)
+            return _html(200, _page_html())
         if path == "/healthz":
             status = 200
             return _json(200, {"ok": True, "mode": "offline",
@@ -337,6 +348,7 @@ PAGE_HTML = """<!doctype html>
   <p class="muted">The agent extracts every feature, delivery, and performance claim, checks each against
   approved docs / roadmap / delivery reviews, and flags what can't be supported — then comments the
   result on the contract itself. Everything here runs <strong>offline</strong> on synthetic data — no login.</p>
+  <p class="tag">{{COST_LINK}}</p>
 </header>
 <main>
   <div class="row">

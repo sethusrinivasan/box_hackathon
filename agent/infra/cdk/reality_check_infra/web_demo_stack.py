@@ -77,6 +77,7 @@ class WebDemoStack(Stack):
         *,
         function_name: str = "reality-check-web-demo",
         reserved_concurrency: int = 5,
+        cost_web_url: str = "",
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -120,6 +121,9 @@ class WebDemoStack(Stack):
                 "EMIT_METRICS": "true",
                 # /var/task is read-only in Lambda; route report/comment writes to /tmp.
                 "REALITY_CHECK_REPORTS_DIR": "/tmp/rc-reports",
+                # When set, the demo page shows a "Cloud cost" link to the cost
+                # web view (RealityCheckCostTracker stack's CostWebUrl output).
+                "COST_WEB_URL": cost_web_url,
             },
             description="Public offline Reality Check demo (no auth).",
         )

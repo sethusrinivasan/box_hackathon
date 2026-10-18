@@ -43,6 +43,9 @@ function_name = app.node.try_get_context("functionName") or "reality-check-web-d
 dashboard_name = app.node.try_get_context("dashboardName") or "RealityCheck"
 alarm_email = app.node.try_get_context("alarmEmail")  # optional
 web_concurrency = int(app.node.try_get_context("webConcurrency") or 5)
+# Optional: URL of the Cloud-cost web view (CostWebUrl output of the cost-tracker
+# stack). When provided, the demo page shows a "Cloud cost" link.
+cost_web_url = app.node.try_get_context("costWebUrl") or ""
 # Live demo URL the hourly canary probes. Defaults to the deployed Function URL;
 # override with -c demoUrl=... for a different deployment.
 demo_url = (app.node.try_get_context("demoUrl")
@@ -64,6 +67,7 @@ WebDemoStack(
     "RealityCheckWebDemo",
     function_name=function_name,
     reserved_concurrency=web_concurrency,
+    cost_web_url=cost_web_url,
     env=env,
     description="Reality Check public web demo: Lambda Function URL (no auth, offline).",
 )

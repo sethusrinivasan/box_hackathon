@@ -1,0 +1,12 @@
+# Native PostgreSQL driver (no RDS Data API). The [binary] extra ships prebuilt
+# manylinux wheels (incl. arm64), so no libpq build step is needed in Lambda.
+psycopg[binary]==3.2.3
+# psycopg's runtime dependency. Pinned explicitly because the strict
+# --platform/--only-binary install flags can skip transitive pure-Python deps.
+typing_extensions>=4.6.0
+# Public CA bundle (Mozilla + Amazon Trust Services roots). psycopg[binary]
+# vendors its own OpenSSL that does NOT find the OS trust store on the Lambda
+# runtime, so we pin a known CA file and point sslrootcert at it for verify-full.
+certifi>=2024.0.0
+# boto3 is provided by the Lambda runtime, but pin it here for local parity.
+boto3>=1.34.0
