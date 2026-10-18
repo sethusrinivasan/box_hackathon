@@ -37,7 +37,13 @@ web_concurrency = int(app.node.try_get_context("webConcurrency") or 5)
 
 env = cdk.Environment(
     account=os.environ.get("CDK_DEFAULT_ACCOUNT"),
-    region=os.environ.get("CDK_DEFAULT_REGION"),
+    # Frugal region default: us-east-1 (N. Virginia) is AWS's lowest-cost
+    # standard region and has the widest Bedrock model availability (incl.
+    # Amazon Nova Lite). Lambda/S3/CloudWatch are the same price in us-east-1
+    # and us-east-2, so an already-deployed us-east-2 stack is fine to leave
+    # in place. Single-region, no cross-region redundancy by design — the demo
+    # does not need it and redundancy would only add cost.
+    region=(os.environ.get("CDK_DEFAULT_REGION") or "us-east-1"),
 )
 
 WebDemoStack(

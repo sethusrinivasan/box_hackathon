@@ -50,9 +50,14 @@ for _p in (HERE, os.path.join(ROOT, "box")):
     sys.path.insert(0, _p)
 
 import local_agent as la          # noqa: E402 — the post-restructure runtime
+from cost_estimate import estimate_cost  # noqa: E402 — live-path cost heads-up
 from telemetry import (           # noqa: E402 — re-wire the shared observability
     get_logger, log_event, emit_metric, set_request_id,
 )
+
+# Model the live path WOULD use (frugal default). Shown in cost estimates only;
+# the hosted demo never actually calls it.
+_LIVE_MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.amazon.nova-lite-v1:0")
 
 _log = get_logger("reality_check.web")
 
@@ -117,20 +122,56 @@ _CONTRACTS = {
 }
 
 
-def _run_review(contract_key: str) -> dict:
+def _estimate_live_cost(contract_key: str, out: dict) -> dict:
+    """Estimate what a REAL Bedrock run of this review would have cost. We
+    reconstruct the exact input the live path sends the model — the contract
+    text plus every evidence PDF's text plus the system prompt — so the estimate
+    reflects reality. Hosted demo never calls Bedrock; this is a transparency
+    heads-up on the live economics."""
+    claims = out.get("claims", []) or []
+    docs = _TmpDocs()
+    # Same text assembly the live llm_review() feeds the model.
+    parts = [getattr(la, "REVIEW_SYSTEM", "")]
+    name = _CONTRACTS.get(contract_key, _CONTRACTS["northstar"])
+    contract = la.match_contract(docs.contracts(), name)
+    if contract:
+        parts.append(la.pdf_text(docs.read(contract["id"])))
+    for e in docs.evidence():
+        parts.append(la.pdf_text(docs.read(e["id"])))
+    input_text = "\n\n".join(p for p in parts if p)
+    out_tokens = max(400, len(claims) * 180)
+    est = estimate_cost(_LIVE_MODEL_ID, input_text=input_text, output_tokens=out_tokens)
+    return est.as_dict()
+
+
+def _run_review(contract_key: str, *, live: bool = False) -> dict:
     name = _CONTRACTS.get(contract_key, _CONTRACTS["northstar"])
     out = la.review_contract(_TmpDocs(), name, _CannedBedrock())
     s = out.get("summary", {})
     emit_metric("WebDemoReview", 1, "Count", contract=contract_key)
     emit_metric("WebDemoRisksFound", s.get("Risk identified", 0), "Count")
-    return {
+    result = {
         "contract": out.get("contract"),
         "summary": s,
         "claims": out.get("claims", []),
         "sources": out.get("sources", []),
         "report_name": out.get("report_name"),
         "comments_posted": out.get("comments_posted_on_contract"),
+        "mode": "mock",
     }
+    if live:
+        # User asked for a live run: we still return the MOCK result, attach the
+        # estimated real-run cost, and tell them how to run it for real.
+        result["mode"] = "mock (live requested)"
+        result["live_cost_estimate"] = _estimate_live_cost(contract_key, out)
+        result["live_notice"] = (
+            "This hosted demo always runs a mock (offline, $0). The estimate "
+            "above is what one real Bedrock review would cost on the configured "
+            "model. For a real run, clone the repo and supply your own AWS "
+            "credentials: https://github.com/sethusrinivasan/box_hackathon"
+        )
+        emit_metric("WebDemoLiveRequested", 1, "Count", contract=contract_key)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -192,8 +233,21 @@ def lambda_handler(event, context=None):
         if path == "/api/run" and method == "POST":
             body = _parse_body(event)
             contract = (body.get("contract") or "northstar").strip()
+            live = bool(body.get("live"))
             status = 200
-            return _json(200, {"contract_key": contract, "result": _run_review(contract)})
+            return _json(200, {"contract_key": contract,
+                               "result": _run_review(contract, live=live)})
+        if path == "/api/estimate" and method in ("GET", "POST"):
+            # Standalone cost heads-up: run the mock to size inputs, return only
+            # the estimated real-run cost (no review payload).
+            body = _parse_body(event) if method == "POST" else {}
+            qs = event.get("queryStringParameters") or {}
+            contract = (body.get("contract") or qs.get("contract") or "northstar").strip()
+            name = _CONTRACTS.get(contract, _CONTRACTS["northstar"])
+            out = la.review_contract(_TmpDocs(), name, _CannedBedrock())
+            status = 200
+            return _json(200, {"contract_key": contract, "mode": "mock",
+                               "live_cost_estimate": _estimate_live_cost(contract, out)})
         if path == "/report.pdf" and method == "GET":
             qs = event.get("queryStringParameters") or {}
             contract = (qs.get("contract") or "northstar").strip()
