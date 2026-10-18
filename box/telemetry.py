@@ -37,7 +37,13 @@ import sys
 import time
 import uuid
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Dict, Iterator, Optional
+
+# One correlation id per logical request/run. Set once at an entry point and
+# every log line emitted anywhere in the call stack is stamped with it
+# automatically — so a single request is traceable end-to-end across loggers.
+_REQUEST_ID: ContextVar[Optional[str]] = ContextVar("rc_request_id", default=None)
 
 # Keys whose values must never appear in logs (case-insensitive substring match).
 _SENSITIVE = (
@@ -181,13 +187,32 @@ def redact(mapping: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 def log_event(logger: logging.Logger, event: str, level: int = logging.INFO,
               **fields: Any) -> None:
     """Emit one structured line. `event` is the message; `fields` become JSON
-    keys. Sensitive values in fields are redacted automatically."""
-    logger.log(level, event, extra={"fields": redact(fields)})
+    keys. Sensitive values are redacted. The current correlation id (if set) is
+    stamped as `request_id` on every line unless the caller passed its own."""
+    merged = dict(fields)
+    rid = _REQUEST_ID.get()
+    if rid and "request_id" not in merged:
+        merged["request_id"] = rid
+    logger.log(level, event, extra={"fields": redact(merged)})
 
 
 def new_request_id() -> str:
     """A short correlation id to thread through one logical run."""
     return f"rc-{uuid.uuid4().hex[:12]}"
+
+
+def set_request_id(request_id: Optional[str] = None) -> str:
+    """Bind a correlation id to the current context (and everything it calls).
+    Call once at an entry point; downstream log_event() lines pick it up
+    automatically. Pass None to generate a fresh id. Returns the id."""
+    rid = request_id or new_request_id()
+    _REQUEST_ID.set(rid)
+    return rid
+
+
+def get_request_id() -> Optional[str]:
+    """The correlation id bound to the current context, if any."""
+    return _REQUEST_ID.get()
 
 
 @contextmanager

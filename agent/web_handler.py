@@ -1,0 +1,333 @@
+"""
+web_handler.py — public, no-auth web demo for Reality Check (contract claim review).
+
+Served by an AWS Lambda Function URL (see agent/infra/cdk/.../web_demo_stack.py).
+Renders one self-contained HTML page and a tiny JSON API that runs the OFFLINE
+contract-review pipeline (agent/local_agent.py) against the bundled synthetic
+fixtures in docs/box_upload/ — reviewing a draft sales contract's claims against
+Box "evidence" documents and returning a claim-by-claim verdict.
+
+Why this is safe to expose publicly with no auth:
+  * OFFLINE ONLY. We use LocalDocs (reads docs/box_upload/*) and a CANNED
+    Bedrock client — no live Box, no real Bedrock call, no credentials in the
+    function env. There is nothing sensitive to leak and no per-request cost
+    beyond Lambda compute.
+  * All data is synthetic (fictional customer "Northstar", fictional evidence).
+  * Report PDFs/comments are written to /tmp only (Lambda's writable scratch)
+    via REALITY_CHECK_REPORTS_DIR; never anywhere durable.
+  * The CDK stack caps blast radius with reserved concurrency.
+
+Routes (Lambda Function URL, payload format 2.0):
+  GET  /                -> the demo page (HTML)
+  POST /api/run         -> review a contract; JSON in, JSON out
+  GET  /report.pdf?...  -> the generated risk-report PDF
+  GET  /healthz         -> liveness probe (JSON)
+"""
+from __future__ import annotations
+
+import base64
+import json
+import logging
+import os
+import sys
+import time
+
+# ---------------------------------------------------------------------------
+# Force OFFLINE mode before importing the agent. local_agent.get_docs() returns
+# BoxDocs only when all six Box env vars are set; blanking them (present-but-
+# empty, so the .env auto-loader can't re-populate) guarantees LocalDocs. We
+# also route report writes to /tmp (the Lambda fs is read-only except /tmp).
+# ---------------------------------------------------------------------------
+for _k in ("BOX_CLIENT_ID", "BOX_CLIENT_SECRET", "BOX_ENTERPRISE_ID",
+           "BOX_CONTRACTS_FOLDER_ID", "BOX_EVIDENCE_FOLDER_ID", "BOX_REPORTS_FOLDER_ID"):
+    os.environ[_k] = ""
+os.environ.pop("BOX_SECRET_ARN", None)
+os.environ.setdefault("LOG_LEVEL", "INFO")
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.abspath(os.path.join(HERE, ".."))
+for _p in (HERE, os.path.join(ROOT, "box")):
+    sys.path.insert(0, _p)
+
+import local_agent as la          # noqa: E402 — the post-restructure runtime
+from telemetry import (           # noqa: E402 — re-wire the shared observability
+    get_logger, log_event, emit_metric, set_request_id,
+)
+
+_log = get_logger("reality_check.web")
+
+# Reports/comments dir: /tmp in Lambda (read-only /var/task otherwise). LocalDocs
+# writes under ROOT/reports; we point ROOT's reports at /tmp via an override.
+_REPORTS_DIR = os.environ.get("REALITY_CHECK_REPORTS_DIR", "/tmp/rc-reports")
+
+
+# ---------------------------------------------------------------------------
+# Canned Bedrock client — deterministic review with no AWS call.
+# ---------------------------------------------------------------------------
+# The claims below are the verified review of the Northstar archive-migration
+# contract against the B1/B2/B3 evidence (same fixtures the live agent reads).
+# Serving a canned result keeps the public demo free, instant, and offline while
+# exercising the real review_contract pipeline (classify -> report -> comments).
+_CANNED_CLAIMS = [
+    {"location": "Section 1", "claim": "The archive will support encryption at rest in the agreed configuration.",
+     "result": "No risk", "risk_category": "None", "evidence_ref": "B1",
+     "evidence_passage": "Encryption at rest: supported",
+     "explanation": "B1 confirms encryption at rest for the Archive tier in US-West (Oregon)."},
+    {"location": "Section 2", "claim": "The archive will include the proposed Smart Archive Search feature at launch.",
+     "result": "Risk identified", "risk_category": "Feature availability", "evidence_ref": "B2",
+     "evidence_passage": "Exploratory",
+     "explanation": "Roadmap lists Smart Archive Search as Exploratory with no release date; it cannot ship at launch."},
+    {"location": "Section 3", "claim": "The archive migration will be completed within 30 days of signature.",
+     "result": "Risk identified", "risk_category": "Delivery deadline", "evidence_ref": "B3",
+     "evidence_passage": "58-72 days",
+     "explanation": "Comparable 400-800 TB migrations took 58-72 days; the contract promises 30."},
+    {"location": "Section 4", "claim": "The archive will sustain read throughput of 10 GB/s in the agreed configuration.",
+     "result": "Risk identified", "risk_category": "Performance commitment", "evidence_ref": "B1",
+     "evidence_passage": "5 GB/s",
+     "explanation": "Benchmark validates 5 GB/s sustained; 10 GB/s has not been tested."},
+    {"location": "Section 5", "claim": "The archive will support direct import from Northstar's LegacyVault system.",
+     "result": "No source found", "risk_category": "None", "evidence_ref": "", "evidence_passage": "",
+     "explanation": "No Box document mentions LegacyVault direct import; confirm with the product owner."},
+]
+
+
+class _CannedBedrock:
+    """Stands in for boto3 bedrock-runtime: returns the canned review as a
+    forced submit_review tool call, the exact shape local_agent expects."""
+
+    def converse(self, **_kw):
+        return {"output": {"message": {"content": [
+            {"toolUse": {"toolUseId": "canned", "name": "submit_review",
+                         "input": {"claims": _CANNED_CLAIMS}}}
+        ]}}}
+
+
+class _TmpDocs(la.LocalDocs):
+    """LocalDocs, but reports/comments go to a writable dir (/tmp in Lambda)."""
+
+    def __init__(self):
+        super().__init__()
+        self.reports = _REPORTS_DIR
+
+
+# Contracts the demo exposes (fixed allow-list, not arbitrary input).
+_CONTRACTS = {
+    "northstar": "Northstar-Archive-Migration-Agreement",
+    "northstar-v2": "Northstar-Archive-Migration-Agreement-v2",
+}
+
+
+def _run_review(contract_key: str) -> dict:
+    name = _CONTRACTS.get(contract_key, _CONTRACTS["northstar"])
+    out = la.review_contract(_TmpDocs(), name, _CannedBedrock())
+    s = out.get("summary", {})
+    emit_metric("WebDemoReview", 1, "Count", contract=contract_key)
+    emit_metric("WebDemoRisksFound", s.get("Risk identified", 0), "Count")
+    return {
+        "contract": out.get("contract"),
+        "summary": s,
+        "claims": out.get("claims", []),
+        "sources": out.get("sources", []),
+        "report_name": out.get("report_name"),
+        "comments_posted": out.get("comments_posted_on_contract"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# HTTP layer (Lambda Function URL, payload format 2.0)
+# ---------------------------------------------------------------------------
+def _json(status, body):
+    return {"statusCode": status,
+            "headers": {"content-type": "application/json", "cache-control": "no-store"},
+            "body": json.dumps(body, default=str)}
+
+
+def _html(status, body):
+    return {"statusCode": status,
+            "headers": {"content-type": "text/html; charset=utf-8", "cache-control": "no-store"},
+            "body": body}
+
+
+def _method_path(event):
+    rc = event.get("requestContext", {}).get("http", {})
+    return (rc.get("method") or event.get("httpMethod") or "GET").upper(), \
+           (rc.get("path") or event.get("rawPath") or "/")
+
+
+def _parse_body(event):
+    raw = event.get("body") or "{}"
+    if event.get("isBase64Encoded"):
+        raw = base64.b64decode(raw).decode("utf-8")
+    try:
+        return json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+_NOISE = ("/favicon.ico", "/robots.txt", "/apple-touch-icon.png",
+          "/apple-touch-icon-precomposed.png")
+
+
+def lambda_handler(event, context=None):
+    method, path = _method_path(event)
+    rid = set_request_id(getattr(context, "aws_request_id", None))
+
+    if path in _NOISE:
+        return {"statusCode": 404, "headers": {"cache-control": "no-store"}, "body": ""}
+
+    src_ip = event.get("requestContext", {}).get("http", {}).get("sourceIp")
+    log_event(_log, "web.request", method=method, path=path, source_ip=src_ip)
+
+    start = time.perf_counter()
+    status = 500
+    contract = None
+    try:
+        if path in ("/", "/index.html") and method == "GET":
+            status = 200
+            return _html(200, PAGE_HTML)
+        if path == "/healthz":
+            status = 200
+            return _json(200, {"ok": True, "mode": "offline",
+                               "contracts": list(_CONTRACTS)})
+        if path == "/api/run" and method == "POST":
+            body = _parse_body(event)
+            contract = (body.get("contract") or "northstar").strip()
+            status = 200
+            return _json(200, {"contract_key": contract, "result": _run_review(contract)})
+        if path == "/report.pdf" and method == "GET":
+            qs = event.get("queryStringParameters") or {}
+            contract = (qs.get("contract") or "northstar").strip()
+            resp = _report_pdf(contract)
+            status = resp["statusCode"]
+            return resp
+        status = 404
+        return _json(404, {"error": f"not found: {method} {path}"})
+    except Exception as exc:  # last-resort guard so the page never 500s silently
+        status = 500
+        log_event(_log, "web.error", level=logging.ERROR, path=path,
+                  contract=contract, error=str(exc), error_type=type(exc).__name__)
+        emit_metric("WebDemoError", 1, "Count")
+        return _json(500, {"error": "internal error", "detail": str(exc)})
+    finally:
+        dur = round((time.perf_counter() - start) * 1000, 1)
+        log_event(_log, "web.response", method=method, path=path,
+                  status=status, duration_ms=dur, contract=contract)
+        emit_metric("WebResponse", 1, "Count", status=str(status))
+
+
+def _report_pdf(contract_key: str) -> dict:
+    """Build the risk-report PDF for a contract and return it inline (base64).
+    Rebuilds via the agent's build_report so no disk write is needed."""
+    name = _CONTRACTS.get(contract_key, _CONTRACTS["northstar"])
+    docs = _TmpDocs()
+    contracts = docs.contracts()
+    contract = la.match_contract(contracts, name)
+    if not contract:
+        return _json(404, {"error": f"no contract '{contract_key}'"})
+    sources = []
+    for i, e in enumerate(docs.evidence(), 1):
+        text = la.pdf_text(docs.read(e["id"]))
+        title = text.strip().splitlines()[0] if text.strip() else e["name"]
+        sources.append({**e, "ref": f"B{i}", "text": text, "title": title,
+                        "last_updated": la.last_updated(text)})
+    claims = la.by_severity(la.classify(_CANNED_CLAIMS))
+    counts = la.summarize(claims)
+    pdf = la.build_report(contract, claims, counts, sources)
+    emit_metric("WebDemoPdf", 1, "Count", contract=contract_key)
+    return {"statusCode": 200,
+            "headers": {"content-type": "application/pdf",
+                        "content-disposition": f'inline; filename="RealityCheck-{contract_key}.pdf"',
+                        "cache-control": "no-store"},
+            "isBase64Encoded": True,
+            "body": base64.b64encode(pdf).decode("ascii")}
+
+
+# ---------------------------------------------------------------------------
+# The single page. Self-contained: no external JS/CSS/CDN.
+# ---------------------------------------------------------------------------
+PAGE_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reality Check — live demo</title>
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --line:#30363d; --fg:#e6edf3;
+          --muted:#9da7b3; --red:#f85149; --amber:#d29922; --green:#3fb950; --accent:#58a6ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:15px/1.55 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
+  header, main { max-width:900px; margin:0 auto; padding:0 20px; }
+  header { padding-top:28px; } h1 { margin:0 0 4px; font-size:24px; }
+  .tag { color:var(--muted); margin:0 0 6px; }
+  .row { display:flex; flex-wrap:wrap; gap:10px; margin:16px 0; }
+  button { background:var(--card); color:var(--fg); border:1px solid var(--line);
+           border-radius:8px; padding:10px 14px; cursor:pointer; font-size:14px; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); color:#0d1117; border-color:var(--accent); font-weight:600; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px 18px; margin:14px 0; }
+  .muted { color:var(--muted); } a { color:var(--accent); }
+  .pill { display:inline-block; padding:2px 9px; border-radius:999px; font-size:12px; font-weight:600; }
+  .High { background:rgba(248,81,73,.15); color:var(--red); }
+  .Medium { background:rgba(210,153,34,.15); color:var(--amber); }
+  .None { background:rgba(63,185,80,.15); color:var(--green); }
+  .claim { border-left:3px solid var(--line); padding:6px 0 6px 12px; margin:10px 0; }
+  .foot { color:var(--muted); font-size:12px; margin:30px 0 60px; }
+  code { background:#0b0f14; padding:1px 5px; border-radius:4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Reality Check <span class="muted">— live demo</span></h1>
+  <p class="tag">Check a draft sales contract's claims against the company's evidence in Box, before you commit.</p>
+  <p class="muted">The agent extracts every feature, delivery, and performance claim, checks each against
+  approved docs / roadmap / delivery reviews, and flags what can't be supported — then comments the
+  result on the contract itself. Everything here runs <strong>offline</strong> on synthetic data — no login.</p>
+</header>
+<main>
+  <div class="row">
+    <button class="primary" onclick="run('northstar')">Review the Northstar archive contract</button>
+    <button onclick="run('northstar-v2')">Review the v2 draft</button>
+  </div>
+  <div id="out"></div>
+  <p class="foot">Synthetic data; fictional customer and evidence. Served by an AWS Lambda function URL
+  running the offline review pipeline. Source:
+  <a href="https://github.com/sethusrinivasan/box_hackathon">github.com/sethusrinivasan/box_hackathon</a>.</p>
+</main>
+<script>
+const out = document.getElementById('out');
+function esc(s){ return String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function pill(sev){ return `<span class="pill ${esc(sev)}">${sev==='None'?'OK':esc(sev)}</span>`; }
+
+async function run(contract){
+  out.innerHTML = '<div class="card muted">Reviewing…</div>';
+  try{
+    const resp = await fetch('/api/run', {method:'POST', headers:{'content-type':'application/json'},
+                                          body: JSON.stringify({contract})});
+    const data = await resp.json();
+    if(!resp.ok){ out.innerHTML = `<div class="card">Error: ${esc(data.error)}</div>`; return; }
+    out.innerHTML = render(contract, data.result);
+  }catch(e){ out.innerHTML = `<div class="card">Request failed: ${esc(e.message)}</div>`; }
+}
+
+function render(key, r){
+  const s = r.summary || {};
+  let h = `<div class="card"><h3 style="margin-top:0">${esc(r.contract)}</h3>`;
+  h += `<p><strong>${esc(s['Risk identified'])}</strong> of ${esc((r.claims||[]).length)} claims need attention before you commit `;
+  h += `<span class="muted">· ${esc(s['No risk'])} no risk · ${esc(s['No source found'])} no source found</span></p>`;
+  h += `<p class="muted">Severity: ${esc(s.severity_High)} High · ${esc(s.severity_Medium)} Medium · ${esc(s.severity_None)} None</p>`;
+  (r.claims||[]).forEach(c=>{
+    h += `<div class="claim">${pill(c.severity)} <strong>${esc(c.result)}</strong>`;
+    if(c.risk_category && c.risk_category!=='None') h += ` <span class="muted">· ${esc(c.risk_category)}</span>`;
+    h += ` <span class="muted">· ${esc(c.location)}</span>`;
+    h += `<br>"${esc(c.claim)}"<br><span class="muted">${esc(c.explanation)}</span>`;
+    if(c.evidence_ref) h += ` <span class="muted">[source ${esc(c.evidence_ref)}]</span>`;
+    h += `</div>`;
+  });
+  h += `<p class="muted" style="margin-top:12px">A comment was posted on every claim, on the contract in Box (${esc(r.comments_posted)} comments).</p>`;
+  h += `<p><a href="/report.pdf?contract=${esc(key)}" target="_blank">Open the risk-report PDF →</a></p>`;
+  return h + '</div>';
+}
+</script>
+</body>
+</html>"""
