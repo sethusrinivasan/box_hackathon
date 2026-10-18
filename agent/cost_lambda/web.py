@@ -40,14 +40,23 @@ _rds = boto3.client("rds", region_name=REGION)
 
 
 def _connect() -> psycopg.Connection:
-    token = _rds.generate_db_auth_token(
-        DBHostname=DB_HOST, Port=DB_PORT, DBUsername=DB_IAM_USER, Region=REGION
-    )
-    return psycopg.connect(
-        host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_IAM_USER,
-        password=token, sslmode="verify-full", sslrootcert=certifi.where(),
-        connect_timeout=15,
-    )
+    """Connect with native PG + IAM token. Aurora Serverless v2 auto-pauses when
+    idle and takes up to ~15s to resume on the first connection, so we retry
+    once with a fresh token to ride through a cold resume instead of 500-ing."""
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        token = _rds.generate_db_auth_token(
+            DBHostname=DB_HOST, Port=DB_PORT, DBUsername=DB_IAM_USER, Region=REGION
+        )
+        try:
+            return psycopg.connect(
+                host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_IAM_USER,
+                password=token, sslmode="verify-full", sslrootcert=certifi.where(),
+                connect_timeout=10,
+            )
+        except psycopg.OperationalError as exc:
+            last_exc = exc  # likely Aurora still resuming; retry once
+    raise last_exc  # type: ignore[misc]
 
 
 def _fetch_costs() -> dict:

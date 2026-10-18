@@ -86,26 +86,36 @@ def collect_costs() -> dict:
 # --------------------------------------------------------------------------- #
 def _connect() -> psycopg.Connection:
     """Open a native PostgreSQL connection using a freshly-minted IAM auth token
-    as the password. No secret is stored; the token is valid ~15 minutes."""
-    token = _rds.generate_db_auth_token(
-        DBHostname=DB_HOST, Port=DB_PORT, DBUsername=DB_IAM_USER, Region=REGION
-    )
-    return psycopg.connect(
-        host=DB_HOST,
-        port=DB_PORT,
-        dbname=DB_NAME,
-        user=DB_IAM_USER,
-        password=token,          # the IAM auth token, not a stored password
-        # verify-full against the certifi public CA bundle. Aurora EXPRESS
-        # configuration's internet access gateway presents a PUBLICLY-trusted
-        # Amazon Trust Services certificate (not the RDS private CA). We can't
-        # use sslrootcert="system" because psycopg[binary] vendors an OpenSSL
-        # that doesn't resolve the Lambda runtime's OS trust store, so we point
-        # at certifi's bundle (which includes the Amazon Trust Services roots).
-        sslmode="verify-full",
-        sslrootcert=certifi.where(),
-        connect_timeout=20,
-    )
+    as the password. No secret is stored; the token is valid ~15 minutes.
+
+    Aurora Serverless v2 auto-pauses when idle and can take ~15s to resume on the
+    first connection, so we retry once (with a fresh token) to ride through a
+    cold resume rather than failing the daily run.
+
+    TLS: verify-full against the certifi public CA bundle. Aurora EXPRESS
+    configuration's internet access gateway presents a PUBLICLY-trusted Amazon
+    Trust Services certificate (not the RDS private CA), and psycopg[binary]
+    vendors an OpenSSL that doesn't resolve the Lambda OS trust store, so we
+    point sslrootcert at certifi's bundle (which has the Amazon Trust roots)."""
+    last_exc: Exception | None = None
+    for _attempt in range(2):
+        token = _rds.generate_db_auth_token(
+            DBHostname=DB_HOST, Port=DB_PORT, DBUsername=DB_IAM_USER, Region=REGION
+        )
+        try:
+            return psycopg.connect(
+                host=DB_HOST,
+                port=DB_PORT,
+                dbname=DB_NAME,
+                user=DB_IAM_USER,
+                password=token,          # the IAM auth token, not a stored password
+                sslmode="verify-full",
+                sslrootcert=certifi.where(),
+                connect_timeout=20,
+            )
+        except psycopg.OperationalError as exc:
+            last_exc = exc  # Aurora likely still resuming; retry once
+    raise last_exc  # type: ignore[misc]
 
 
 _DDL = """
