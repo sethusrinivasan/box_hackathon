@@ -24,10 +24,13 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import time
 
 import boto3
 import certifi
 import psycopg
+
+from metrics import emit_metric
 
 DB_HOST = os.environ["DB_HOST"]
 DB_PORT = int(os.environ.get("DB_PORT", "5432"))
@@ -44,18 +47,27 @@ def _connect() -> psycopg.Connection:
     idle and takes up to ~15s to resume on the first connection, so we retry
     once with a fresh token to ride through a cold resume instead of 500-ing."""
     last_exc: Exception | None = None
+    started = time.perf_counter()
     for attempt in range(2):
         token = _rds.generate_db_auth_token(
             DBHostname=DB_HOST, Port=DB_PORT, DBUsername=DB_IAM_USER, Region=REGION
         )
         try:
-            return psycopg.connect(
+            conn = psycopg.connect(
                 host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_IAM_USER,
                 password=token, sslmode="verify-full", sslrootcert=certifi.where(),
                 connect_timeout=10,
             )
+            # Instrumentation: connect latency + cold-resume retry flag, so the
+            # dashboard tracks Aurora Serverless v2 resume behavior over time.
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            emit_metric("DbConnectLatencyMs", round(elapsed_ms, 1), "Milliseconds",
+                        fn="web")
+            emit_metric("DbColdResume", 1 if attempt > 0 else 0, "Count", fn="web")
+            return conn
         except psycopg.OperationalError as exc:
             last_exc = exc  # likely Aurora still resuming; retry once
+    emit_metric("DbConnectFailure", 1, "Count", fn="web")
     raise last_exc  # type: ignore[misc]
 
 

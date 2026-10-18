@@ -153,6 +153,7 @@ class CostTrackerStack(Stack):
                 "DB_IAM_USER": db_iam_user,
                 "AWS_REGION_NAME": self.region,
                 "LOG_LEVEL": "INFO",
+                "EMIT_METRICS": "true",   # DB connect latency / cold-resume metrics
             },
             description="Daily holistic AWS cost collector → Aurora (IAM-auth, native PG).",
         )
@@ -207,6 +208,7 @@ class CostTrackerStack(Stack):
                 "DB_READER_USER": db_reader_user,
                 "AWS_REGION_NAME": self.region,
                 "COST_WINDOW_DAYS": "30",
+                "EMIT_METRICS": "true",   # DB connect latency / cold-resume metrics
             },
             description="Public Cloud-cost web view (read-only, IAM-auth, native PG).",
         )

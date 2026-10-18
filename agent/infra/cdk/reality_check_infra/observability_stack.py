@@ -191,6 +191,34 @@ class ObservabilityStack(Stack):
             ),
         )
 
+        # Row 5 — cost-infra: Aurora Serverless v2 cold-resume behavior. Tracks
+        # how long DB connects take and how often a cold resume is hit, so we can
+        # watch this trend over months and see if AWS improves resume latency.
+        dashboard.add_widgets(
+            self._db_connect_latency_widget(),
+            self._db_cold_resume_widget(),
+            self._db_connect_failure_widget(),
+        )
+        dashboard.add_widgets(
+            self._caption(
+                "**DB connect latency (p50/p99)**",
+                "Time to open a native-PG IAM-auth connection to Aurora. A cold "
+                "resume from auto-pause (min 0 ACU) spikes p99 toward ~15s; a "
+                "falling trend over time signals AWS platform resume improvements.",
+            ),
+            self._caption(
+                "**Cold-resume retries**",
+                "Count of connections that needed the resume retry (i.e. hit a "
+                "paused cluster). High counts = frequent idle→resume cycles; the "
+                "trend shows how often users pay the resume penalty.",
+            ),
+            self._caption(
+                "**DB connect failures**",
+                "Connections that failed even after the resume retry. Should be "
+                "zero; any sustained value means resume is exceeding our timeout.",
+            ),
+        )
+
         CfnOutput(
             self,
             "DashboardURL",
@@ -216,6 +244,58 @@ class ObservabilityStack(Stack):
             ),
             width=8,
             height=1,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Row 5 — cost-infra: Aurora Serverless v2 cold-resume behavior
+    # ------------------------------------------------------------------ #
+    # Metrics are emitted by the cost Lambdas into the "RealityCheckCost" EMF
+    # namespace (agent/cost_lambda/metrics.py).
+    def _cost_metric(self, metric_name: str, *, stat: str = "Average",
+                     label: Optional[str] = None,
+                     color: Optional[str] = None) -> cw.Metric:
+        return cw.Metric(
+            namespace="RealityCheckCost",
+            metric_name=metric_name,
+            statistic=stat,
+            period=Duration.hours(1),
+            label=label,
+            color=color,
+        )
+
+    def _db_connect_latency_widget(self) -> cw.GraphWidget:
+        return cw.GraphWidget(
+            title="DB connect latency (p50 / p99) — Aurora resume",
+            width=8, height=5,
+            left=[
+                self._cost_metric("DbConnectLatencyMs", stat="p50",
+                                  label="p50", color=BLUE),
+                self._cost_metric("DbConnectLatencyMs", stat="p99",
+                                  label="p99", color=AMBER),
+            ],
+            left_y_axis=cw.YAxisProps(min=0, label="ms"),
+            left_annotations=[
+                cw.HorizontalAnnotation(value=15000, label="~15s cold resume",
+                                        color=RED),
+            ],
+        )
+
+    def _db_cold_resume_widget(self) -> cw.GraphWidget:
+        return cw.GraphWidget(
+            title="Cold-resume retries (hit a paused cluster)",
+            width=8, height=5,
+            left=[self._cost_metric("DbColdResume", stat="Sum",
+                                    label="cold resumes", color=PURPLE)],
+            left_y_axis=cw.YAxisProps(min=0),
+        )
+
+    def _db_connect_failure_widget(self) -> cw.GraphWidget:
+        return cw.GraphWidget(
+            title="DB connect failures (after retry)",
+            width=8, height=5,
+            left=[self._cost_metric("DbConnectFailure", stat="Sum",
+                                    label="failures", color=RED)],
+            left_y_axis=cw.YAxisProps(min=0),
         )
 
     # ------------------------------------------------------------------ #

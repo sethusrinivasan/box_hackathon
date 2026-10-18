@@ -19,10 +19,13 @@ import datetime as dt
 import json
 import logging
 import os
+import time
 
 import boto3
 import certifi
 import psycopg
+
+from metrics import emit_metric
 
 log = logging.getLogger("cost_collector")
 log.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
@@ -98,12 +101,13 @@ def _connect() -> psycopg.Connection:
     vendors an OpenSSL that doesn't resolve the Lambda OS trust store, so we
     point sslrootcert at certifi's bundle (which has the Amazon Trust roots)."""
     last_exc: Exception | None = None
-    for _attempt in range(2):
+    started = time.perf_counter()
+    for attempt in range(2):
         token = _rds.generate_db_auth_token(
             DBHostname=DB_HOST, Port=DB_PORT, DBUsername=DB_IAM_USER, Region=REGION
         )
         try:
-            return psycopg.connect(
+            conn = psycopg.connect(
                 host=DB_HOST,
                 port=DB_PORT,
                 dbname=DB_NAME,
@@ -113,8 +117,17 @@ def _connect() -> psycopg.Connection:
                 sslrootcert=certifi.where(),
                 connect_timeout=20,
             )
+            # Instrumentation: total connect latency + whether a cold-resume
+            # retry was needed. Lets the dashboard track Aurora resume behavior.
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            emit_metric("DbConnectLatencyMs", round(elapsed_ms, 1), "Milliseconds",
+                        fn="collector")
+            emit_metric("DbColdResume", 1 if attempt > 0 else 0, "Count",
+                        fn="collector")
+            return conn
         except psycopg.OperationalError as exc:
             last_exc = exc  # Aurora likely still resuming; retry once
+    emit_metric("DbConnectFailure", 1, "Count", fn="collector")
     raise last_exc  # type: ignore[misc]
 
 

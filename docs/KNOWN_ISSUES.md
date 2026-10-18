@@ -51,3 +51,33 @@ Trade-offs accepted with this workaround:
 Replace the custom resource with a native property once AWS ships
 CloudFormation support for `WithExpressConfiguration` (and, ideally, CDK L2
 support). See the linked GitHub issue for the AWS tracking details.
+
+---
+
+## KI-2 — Aurora Serverless v2 cold-resume latency on the cost views
+
+**Status:** Open (platform-dependent) · instrumented on the CloudWatch dashboard
+**Area:** `agent/cost_lambda/web.py`, `agent/cost_lambda/handler.py`
+
+### Issue
+
+Aurora Serverless v2 with min 0 ACU auto-pauses after idle (frugal: $0 compute
+when idle). The first connection after a pause triggers a resume that can take
+up to ~15s. On the public "Cloud cost" web view this showed up as occasional
+cold-load latency (and, before the fix, a 500 when the connect timeout was
+exceeded).
+
+### Workaround in place
+
+Both DB `_connect()` paths retry once with a fresh IAM token to ride through the
+resume instead of failing. We also **instrument** the behavior: the cost Lambdas
+emit `DbConnectLatencyMs`, `DbColdResume`, and `DbConnectFailure` to the
+`RealityCheckCost` CloudWatch namespace (see `agent/cost_lambda/metrics.py`), and
+the observability dashboard has a "cost-infra" row (Row 5) charting them.
+
+### Why we track it
+
+This lets us watch cold-resume latency trend over months and see whether AWS
+improves Aurora Serverless v2 resume times in future platform updates — at which
+point we may be able to drop the retry or tighten timeouts. The p99 latency
+widget has a ~15s annotation for reference.
