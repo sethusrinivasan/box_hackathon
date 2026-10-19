@@ -56,14 +56,30 @@ corpus.
 ### 3.1 Data flow
 
 ```
-INGEST (once per evidence doc, or on change)
-  evidence PDF ──► chunk (≈500 tokens, overlap) ──► Titan embed ──► INSERT evidence_chunk(embedding, passage, source_ref, …)
+INGEST (once per evidence doc, or on change) — agent/ingest_evidence.py
+  evidence PDF ──► chunk (~1200 chars, 200 overlap) ──► Titan embed ──► upsert evidence_chunk(embedding, passage, source_ref, …)
 
-REVIEW (per extracted claim)
-  claim text ──► Titan embed ──► SELECT … ORDER BY embedding <=> :q LIMIT k ──► top-k passages ──► Bedrock review prompt
+REVIEW (per contract) — agent/local_agent.py _gather_sources()
+  contract text ──► Titan embed ──► SELECT … ORDER BY embedding <=> :q LIMIT k
+                 ──► regroup top-k passages into per-source blocks ──► Bedrock review prompt
 ```
 
-Only the top-k passages (k≈5) enter the prompt instead of the whole corpus.
+**Why retrieve per contract, not per claim.** The agent extracts claims *inside*
+the single Bedrock `converse` call (tool-use), so individual claims are not known
+before the model runs. We therefore embed the whole contract and retrieve the
+top-k evidence passages most relevant to it, then pass only those. This fits the
+one-pass review while still bounding the prompt to k passages instead of the
+whole corpus.
+
+**Corpus-size gate.** Retrieval only engages when the corpus has at least
+`EVIDENCE_MIN_DOCS` (default 8) documents. Below that, top-k is not smaller than
+the corpus, so the full corpus is cheaper and loses nothing — the demo's 3
+evidence docs run full-corpus, unchanged. The token/context win is realized at
+scale (dozens–hundreds of docs), where k passages ≪ corpus.
+
+**Graceful fallback.** Any miss — store disabled, no DB, pgvector error, Bedrock
+error, or zero hits — transparently falls back to the full corpus. The feature is
+purely additive; nothing breaks when it is off (the default).
 
 ### 3.2 Embedding model
 
@@ -158,14 +174,33 @@ so a connection is only ever allowed to this account/region's cluster.
 - Aurora Serverless v2 **auto-pause** still applies; the first query after idle
   pays the cold-resume penalty already tracked by the DB-resume dashboard row.
 
-## 6. Status / next steps
+## 6. Status
 
 - [x] pgvector extension enabled on the live cluster (0.8.1) and in `schema.sql`.
-- [ ] Add the `evidence_chunk` table + HNSW index to `schema.sql`.
-- [ ] Ingest path: chunk + Titan-embed the evidence corpus → upsert rows.
-- [ ] Wire top-k retrieval into `review_contract()`; add `bedrock:InvokeModel`
-      (Titan) to the review role.
-- [ ] Backfill/measure token reduction vs. the whole-corpus baseline.
+- [x] `evidence_chunk` table + HNSW cosine index + `evidence_reader` /
+      `evidence_writer` least-privilege roles in `schema.sql`.
+- [x] `agent/evidence_store.py` — chunking, Titan embedding, retrieval, and
+      ingest helpers; lazy clients so pure logic is unit-testable offline.
+- [x] Ingest path `agent/ingest_evidence.py` (+ `data/generate_evidence_corpus.py`
+      for a synthetic 100-doc demo corpus).
+- [x] Retrieval wired into `review_contract()` via `_gather_sources()`, behind
+      the `EVIDENCE_STORE` flag and an `EVIDENCE_MIN_DOCS` corpus-size gate, with
+      transparent fallback to the full corpus.
+- [x] Measured on a 103-source / 180-chunk corpus: top-6 retrieval surfaces the
+      archive-relevant docs and **skips ~94% of the corpus**, cutting the evidence
+      prompt from ~30.5K tokens (100 sources) to ~1.6K tokens (6 sources) —
+      **~95% fewer evidence tokens** per review.
+- [x] Tests: `agent/test_evidence_store.py` (chunking, vec literal, gating).
 
-*Grounded in live inspection of the cluster and the current
-`agent/local_agent.py` review flow.*
+### Enabling in a deployment
+The feature is **off by default**. To turn it on for the review Lambda:
+- env: `EVIDENCE_STORE=on`, `DB_HOST=<cluster-endpoint>`, `DB_NAME=postgres`,
+  `EVIDENCE_DB_USER=evidence_reader`, `AWS_REGION`; optional
+  `EVIDENCE_TOP_K` (6), `EVIDENCE_MIN_DOCS` (8).
+- IAM on the review role: `rds-db:connect` scoped to the cluster's
+  `evidence_reader` db user (with the `aws:ResourceAccount`/`aws:RequestedRegion`
+  conditions used elsewhere), plus `bedrock:InvokeModel` on the Titan embed model.
+- Run `agent/ingest_evidence.py` once (writer role) to populate `evidence_chunk`.
+
+*Grounded in live inspection of the cluster and a live end-to-end run against a
+100-document evidence corpus.*

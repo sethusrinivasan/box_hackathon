@@ -105,3 +105,55 @@ GRANT CONNECT ON DATABASE postgres TO cost_reader;
 GRANT USAGE ON SCHEMA public TO cost_reader;
 GRANT SELECT ON daily_cost TO cost_reader;
 GRANT SELECT ON resource_inventory TO cost_reader;
+
+-- -----------------------------------------------------------------------------
+-- pgvector evidence store for semantic retrieval during contract review.
+-- Embeddings: Amazon Titan Text Embeddings v2 → 1024-dim vectors.
+-- Design + rationale: docs/DESIGN_pgvector_evidence_retrieval.md
+-- (pgvector is enabled as `vector` near the top of this file.)
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS evidence_chunk (
+    id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    source_ref    text         NOT NULL,          -- "B1","B2",… maps to the review's evidence_ref
+    source_name   text         NOT NULL,          -- original doc filename/title
+    chunk_no      int          NOT NULL,          -- ordinal within the doc
+    passage       text         NOT NULL,          -- chunk text = the citation shown to the user
+    last_updated  date,                           -- doc freshness (already tracked per source)
+    embedding     vector(1024) NOT NULL,
+    created_at    timestamptz  NOT NULL DEFAULT now(),
+    UNIQUE (source_ref, chunk_no)
+);
+
+-- Cosine-distance ANN index (embeddings are L2-normalized → cosine is correct).
+-- HNSW needs no training step and gives strong recall on a small/medium corpus
+-- that grows incrementally. See the design doc for the HNSW-vs-IVFFlat rationale.
+CREATE INDEX IF NOT EXISTS evidence_chunk_embedding_hnsw
+    ON evidence_chunk USING hnsw (embedding vector_cosine_ops);
+
+-- WRITER role: the one-time ingest path (agent/ingest_evidence.py) embeds the
+-- corpus and replaces rows. INSERT/DELETE/SELECT only, IAM-auth only.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'evidence_writer') THEN
+        CREATE ROLE evidence_writer WITH LOGIN;
+    END IF;
+END
+$$;
+GRANT rds_iam TO evidence_writer;
+GRANT CONNECT ON DATABASE postgres TO evidence_writer;
+GRANT USAGE ON SCHEMA public TO evidence_writer;
+GRANT SELECT, INSERT, DELETE ON evidence_chunk TO evidence_writer;
+
+-- READER role: the review Lambda. SELECT-only on evidence_chunk — it can query
+-- for similar passages but never write, and can see nothing else.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'evidence_reader') THEN
+        CREATE ROLE evidence_reader WITH LOGIN;
+    END IF;
+END
+$$;
+GRANT rds_iam TO evidence_reader;
+GRANT CONNECT ON DATABASE postgres TO evidence_reader;
+GRANT USAGE ON SCHEMA public TO evidence_reader;
+GRANT SELECT ON evidence_chunk TO evidence_reader;
