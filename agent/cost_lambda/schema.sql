@@ -20,6 +20,8 @@
 -- CREATE EXTENSION requires admin privileges, so it runs here as the `postgres`
 -- bootstrap user — the runtime Lambda roles do not need (and are not granted)
 -- extension-creation rights. Idempotent via IF NOT EXISTS.
+-- Intended use case + schema design: docs/DESIGN_pgvector_evidence_retrieval.md
+-- (semantic retrieval of contract-review evidence; not used by daily_cost).
 -- -----------------------------------------------------------------------------
 CREATE EXTENSION IF NOT EXISTS vector;
 
