@@ -78,6 +78,7 @@ class WebDemoStack(Stack):
         function_name: str = "reality-check-web-demo",
         reserved_concurrency: int = 5,
         cost_web_url: str = "",
+        flag_param_name: str = "/reality-check/web-demo/evidence-store",
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -124,9 +125,26 @@ class WebDemoStack(Stack):
                 # When set, the demo page shows a "Cloud cost" link to the cost
                 # web view (RealityCheckCostTracker stack's CostWebUrl output).
                 "COST_WEB_URL": cost_web_url,
+                # SSM-backed feature flag the demo page reads/flips (pgvector
+                # evidence retrieval on|off). Parameter name only — no secret.
+                "EVIDENCE_FLAG_PARAM": flag_param_name,
             },
             description="Public offline Reality Check demo (no auth).",
         )
+
+        # --- Feature-flag access (scoped, calculated-risk) ------------------
+        # The public page both reads and flips ONE SSM parameter. Grant exactly
+        # ssm:GetParameter + PutParameter on that single parameter ARN — no
+        # wildcards, no other SSM access. Blast radius is one boolean in
+        # {on, off}: no data exposure, no privilege escalation. Acceptable for a
+        # public demo toggle; a production flag would gate writes behind auth.
+        role.add_to_policy(iam.PolicyStatement(
+            sid="DemoFeatureFlagReadWrite",
+            actions=["ssm:GetParameter", "ssm:PutParameter"],
+            resources=[
+                f"arn:aws:ssm:{self.region}:{self.account}:parameter{flag_param_name}"
+            ],
+        ))
 
         url = fn.add_function_url(
             auth_type=lambda_.FunctionUrlAuthType.NONE,
