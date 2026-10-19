@@ -49,6 +49,15 @@ def _wait_endpoint(cluster_id: str) -> dict:
 # one — modify-db-cluster simply ignores unknown types we do not request.
 _LOG_EXPORTS = ["postgresql", "instance", "iam-db-auth-error"]
 
+# Purpose/classification tags. Beyond cost allocation, these back tag-scoped
+# (ABAC) IAM on the management-plane actions (rds:ModifyDBCluster etc.), so the
+# provider role can only act on clusters that carry them.
+_TAGS = [
+    {"Key": "Project", "Value": "RealityCheck"},
+    {"Key": "Component", "Value": "cost-tracker"},
+    {"Key": "DataClassification", "Value": "cost-metrics"},
+]
+
 
 def _on_create(cluster_id: str) -> dict:
     rds.create_db_cluster(
@@ -56,6 +65,7 @@ def _on_create(cluster_id: str) -> dict:
         Engine="aurora-postgresql",
         WithExpressConfiguration=True,
         EnableCloudwatchLogsExports=_LOG_EXPORTS,
+        Tags=_TAGS,
     )
     c = _wait_endpoint(cluster_id)
     return {
