@@ -42,11 +42,20 @@ def _wait_endpoint(cluster_id: str) -> dict:
     raise TimeoutError(f"endpoint not assigned for {cluster_id} in time")
 
 
+# All CloudWatch log types Aurora PostgreSQL can export. Enabling every
+# supported type gives full operational visibility (query/error logs via
+# "postgresql", engine "instance" logs, and "iam-db-auth-error" so failed
+# IAM-auth attempts are auditable). Harmless if a future engine version drops
+# one — modify-db-cluster simply ignores unknown types we do not request.
+_LOG_EXPORTS = ["postgresql", "instance", "iam-db-auth-error"]
+
+
 def _on_create(cluster_id: str) -> dict:
     rds.create_db_cluster(
         DBClusterIdentifier=cluster_id,
         Engine="aurora-postgresql",
         WithExpressConfiguration=True,
+        EnableCloudwatchLogsExports=_LOG_EXPORTS,
     )
     c = _wait_endpoint(cluster_id)
     return {
@@ -59,8 +68,22 @@ def _on_create(cluster_id: str) -> dict:
     }
 
 
+def _ensure_log_exports(c: dict) -> None:
+    """Enable any supported CloudWatch log export not already on. Idempotent —
+    lets a redeploy bring an already-existing cluster up to the desired state."""
+    enabled = set(c.get("EnabledCloudwatchLogsExports") or [])
+    to_enable = [t for t in _LOG_EXPORTS if t not in enabled]
+    if to_enable:
+        rds.modify_db_cluster(
+            DBClusterIdentifier=c["DBClusterIdentifier"],
+            CloudwatchLogsExportConfiguration={"EnableLogTypes": to_enable},
+            ApplyImmediately=True,
+        )
+
+
 def _current(cluster_id: str) -> dict:
     c = rds.describe_db_clusters(DBClusterIdentifier=cluster_id)["DBClusters"][0]
+    _ensure_log_exports(c)
     return {
         "PhysicalResourceId": c["DbClusterResourceId"],
         "Data": {

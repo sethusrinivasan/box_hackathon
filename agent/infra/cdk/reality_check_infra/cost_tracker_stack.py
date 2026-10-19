@@ -91,6 +91,7 @@ class CostTrackerStack(Stack):
         provider_fn.add_to_role_policy(iam.PolicyStatement(
             actions=[
                 "rds:CreateDBCluster",
+                "rds:ModifyDBCluster",        # enable CloudWatch log exports on update
                 "rds:DeleteDBCluster",
                 "rds:DescribeDBClusters",
                 "rds:CreateDBInstance",       # express config creates the writer

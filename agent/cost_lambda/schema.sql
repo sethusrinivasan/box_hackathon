@@ -14,6 +14,15 @@
 -- collector Lambda uses at runtime (also via IAM tokens). The admin user is
 -- never used by the Lambda.
 
+-- -----------------------------------------------------------------------------
+-- Extensions. pgvector ("vector") is enabled so the database can store and
+-- query embeddings (vector similarity search) alongside the cost tables.
+-- CREATE EXTENSION requires admin privileges, so it runs here as the `postgres`
+-- bootstrap user — the runtime Lambda roles do not need (and are not granted)
+-- extension-creation rights. Idempotent via IF NOT EXISTS.
+-- -----------------------------------------------------------------------------
+CREATE EXTENSION IF NOT EXISTS vector;
+
 -- IAM-auth login: no password, authenticates only via IAM tokens.
 DO $$
 BEGIN
