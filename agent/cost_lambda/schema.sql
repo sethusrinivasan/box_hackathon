@@ -44,17 +44,44 @@ GRANT USAGE, CREATE ON SCHEMA public TO cost_collector;
 
 -- Table the collector upserts into (it also CREATE TABLE IF NOT EXISTS at
 -- runtime, but we create it here so grants are explicit).
+-- Columns: net spend (unblended/blended/net), GROSS pre-credit spend
+-- (gross_usd/gross_services) which is the real consumption on a credit-covered
+-- account, the credit offset, and a daily credit-balance + runway snapshot.
 CREATE TABLE IF NOT EXISTS daily_cost (
-    usage_date     date PRIMARY KEY,
-    unblended_usd  numeric(14,6) NOT NULL,
-    blended_usd    numeric(14,6) NOT NULL,
-    net_usd        numeric(14,6) NOT NULL,
-    currency       text          NOT NULL,
-    services       jsonb         NOT NULL,
-    collected_at   timestamptz   NOT NULL DEFAULT now()
+    usage_date            date PRIMARY KEY,
+    unblended_usd         numeric(14,6) NOT NULL,
+    blended_usd           numeric(14,6) NOT NULL,
+    net_usd               numeric(14,6) NOT NULL,
+    currency              text          NOT NULL,
+    services              jsonb         NOT NULL,
+    gross_usd             numeric(14,6),
+    credit_usd            numeric(14,6),
+    gross_services        jsonb,
+    plan_type             text,
+    credits_granted_usd   numeric(14,2),
+    credits_remaining_usd numeric(14,2),
+    credits_consumed_usd  numeric(14,2),
+    credits_expiry        date,
+    projection            jsonb,
+    collected_at          timestamptz   NOT NULL DEFAULT now()
 );
 
 GRANT SELECT, INSERT, UPDATE ON daily_cost TO cost_collector;
+
+-- Active-resource inventory: every taggable resource plus creation time where
+-- discoverable. first_seen/last_seen accumulate a running-time history across
+-- runs even when AWS does not expose a creation time.
+CREATE TABLE IF NOT EXISTS resource_inventory (
+    arn            text PRIMARY KEY,
+    service        text        NOT NULL,
+    resource_type  text        NOT NULL,
+    region         text        NOT NULL,
+    created_at     timestamptz,
+    first_seen     timestamptz NOT NULL DEFAULT now(),
+    last_seen      timestamptz NOT NULL DEFAULT now()
+);
+
+GRANT SELECT, INSERT, UPDATE ON resource_inventory TO cost_collector;
 
 -- Future tables in public also usable by the collector (defensive).
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
@@ -77,3 +104,4 @@ GRANT rds_iam TO cost_reader;
 GRANT CONNECT ON DATABASE postgres TO cost_reader;
 GRANT USAGE ON SCHEMA public TO cost_reader;
 GRANT SELECT ON daily_cost TO cost_reader;
+GRANT SELECT ON resource_inventory TO cost_reader;

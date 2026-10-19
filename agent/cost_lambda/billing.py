@@ -26,8 +26,6 @@ import datetime as dt
 import logging
 import os
 
-import boto3
-
 log = logging.getLogger("cost_collector.billing")
 
 REGION = os.environ.get("AWS_REGION_NAME") or os.environ.get("AWS_REGION", "us-east-1")
@@ -37,8 +35,23 @@ REGION = os.environ.get("AWS_REGION_NAME") or os.environ.get("AWS_REGION", "us-e
 # differs. If unset/unknown we report granted as null rather than guessing.
 ASSUMED_CREDIT_GRANT = float(os.environ.get("ASSUMED_CREDIT_GRANT_USD", "200") or 0)
 
-_ce = boto3.client("ce", region_name=REGION)
-_ft = boto3.client("freetier", region_name="us-east-1")  # freetier is us-east-1 only
+# boto3 clients are created lazily so pure helpers (e.g. credit_projection) can
+# be imported and unit-tested without boto3 or AWS credentials present.
+_clients: dict = {}
+
+
+def _ce_client():
+    if "ce" not in _clients:
+        import boto3
+        _clients["ce"] = boto3.client("ce", region_name=REGION)
+    return _clients["ce"]
+
+
+def _ft_client():
+    if "ft" not in _clients:
+        import boto3
+        _clients["ft"] = boto3.client("freetier", region_name="us-east-1")  # us-east-1 only
+    return _clients["ft"]
 
 
 def _ce_total(start: str, end: str, record_type: str | None = None,
@@ -51,7 +64,7 @@ def _ce_total(start: str, end: str, record_type: str | None = None,
     if record_type:
         kwargs["Filter"] = {"Dimensions": {"Key": "RECORD_TYPE",
                                            "Values": [record_type]}}
-    res = _ce.get_cost_and_usage(**kwargs)
+    res = _ce_client().get_cost_and_usage(**kwargs)
     total = 0.0
     for period in res["ResultsByTime"]:
         amt = period["Total"].get(metric, {}).get("Amount")
@@ -69,7 +82,7 @@ def account_plan() -> dict:
     out = {"plan_type": None, "credits_remaining": None,
            "credits_expiry": None, "credits_granted": None}
     try:
-        r = _ft.get_account_plan_state()
+        r = _ft_client().get_account_plan_state()
         out["plan_type"] = r.get("accountPlanType")
         rem = (r.get("accountPlanRemainingCredits") or {}).get("amount")
         out["credits_remaining"] = float(rem) if rem is not None else None
@@ -134,7 +147,7 @@ def free_tier_usage() -> list[dict]:
     """Classic free-tier limit usage (empty on credit-only accounts)."""
     rows: list[dict] = []
     try:
-        paginator = _ft.get_paginator("get_free_tier_usage")
+        paginator = _ft_client().get_paginator("get_free_tier_usage")
         for page in paginator.paginate():
             for u in page.get("freeTierUsages", []):
                 rows.append({

@@ -71,27 +71,62 @@ def _connect() -> psycopg.Connection:
     raise last_exc  # type: ignore[misc]
 
 
+def _f(v) -> float:
+    return float(v) if v is not None else 0.0
+
+
+def _fmt(v) -> str:
+    """Format a dollar amount for display; '—' when unknown."""
+    return f"{float(v):.2f}" if v is not None else "—"
+
+
 def _fetch_costs() -> dict:
     cutoff = (dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=DAYS)).isoformat()
     rows = []
+    credit = {}          # latest-day credit snapshot
+    resource_count = 0
     with _connect() as conn:
         with conn.cursor() as cur:
+            # GROSS pre-credit spend is the real consumption; net collapses to
+            # ~$0 while credits cover usage. gross_services is the pre-credit
+            # per-service breakdown; fall back to net `services` for old rows.
             cur.execute(
-                "SELECT usage_date, unblended_usd, net_usd, currency, services "
+                "SELECT usage_date, gross_usd, net_usd, currency, "
+                "       COALESCE(gross_services, services), plan_type, "
+                "       credits_remaining_usd, credits_consumed_usd, "
+                "       credits_granted_usd, credits_expiry, projection "
                 "FROM daily_cost WHERE usage_date >= %s ORDER BY usage_date DESC;",
                 (cutoff,),
             )
-            for d, unblended, net, cur_code, services in cur.fetchall():
+            for (d, gross, net, cur_code, services, plan_type, rem, cons,
+                 granted, expiry, projection) in cur.fetchall():
                 rows.append({
                     "date": d.isoformat(),
-                    "unblended_usd": float(unblended),
-                    "net_usd": float(net),
+                    "gross_usd": _f(gross),
+                    "net_usd": _f(net),
                     "currency": cur_code,
                     "services": services or {},
                 })
-    window_unblended = round(sum(r["unblended_usd"] for r in rows), 4)
+                # First (latest) row carries the current credit snapshot.
+                if not credit:
+                    credit = {
+                        "plan_type": plan_type,
+                        "credits_granted_usd": _f(granted) if granted is not None else None,
+                        "credits_remaining_usd": _f(rem) if rem is not None else None,
+                        "credits_consumed_usd": _f(cons) if cons is not None else None,
+                        "credits_expiry": expiry.isoformat() if expiry else None,
+                        "projection": projection or {},
+                    }
+            # Resource inventory summary (count + newest-seen), best-effort.
+            try:
+                cur.execute("SELECT count(*) FROM resource_inventory;")
+                resource_count = int(cur.fetchone()[0])
+            except Exception:  # table may not exist on a pre-migration DB
+                resource_count = 0
+
+    window_gross = round(sum(r["gross_usd"] for r in rows), 4)
     window_net = round(sum(r["net_usd"] for r in rows), 4)
-    # Roll up spend by service across the window.
+    # Roll up GROSS spend by service across the window.
     by_service: dict[str, float] = {}
     for r in rows:
         for svc, amt in r["services"].items():
@@ -100,9 +135,11 @@ def _fetch_costs() -> dict:
     return {
         "window_days": DAYS,
         "days_recorded": len(rows),
-        "window_unblended_usd": window_unblended,
+        "window_gross_usd": window_gross,
         "window_net_usd": window_net,
         "currency": rows[0]["currency"] if rows else "USD",
+        "credit": credit,
+        "resource_count": resource_count,
         "daily": rows,
         "top_services": [{"service": s, "usd": round(v, 4)} for s, v in top_services],
     }
@@ -147,7 +184,7 @@ def _render(data: dict) -> str:
 
     rows = "".join(
         f"<tr><td>{esc(r['date'])}</td>"
-        f"<td class='num'>${r['unblended_usd']:.4f}</td>"
+        f"<td class='num'>${r['gross_usd']:.4f}</td>"
         f"<td class='num'>${r['net_usd']:.4f}</td></tr>"
         for r in data["daily"]
     ) or "<tr><td colspan='3' class='muted'>No cost data recorded yet.</td></tr>"
@@ -156,6 +193,33 @@ def _render(data: dict) -> str:
         f"<tr><td>{esc(s['service'])}</td><td class='num'>${s['usd']:.4f}</td></tr>"
         for s in data["top_services"]
     ) or "<tr><td colspan='2' class='muted'>No service spend in this window.</td></tr>"
+
+    # Credit / runway card — the point of the whole view: usage is free today
+    # (credits), so track gross burn and project how long credits last.
+    c = data.get("credit") or {}
+    proj = c.get("projection") or {}
+    rem = c.get("credits_remaining_usd")
+    gr = c.get("credits_granted_usd")
+    cons = c.get("credits_consumed_usd")
+    binding = proj.get("binding_limit")
+    exp_days = proj.get("days_until_expiry")
+    exh_days = proj.get("days_until_exhaustion")
+    avg_burn = proj.get("avg_daily_gross_usd")
+    if binding == "expiry":
+        runway = (f"credits <b>expire</b> in <b>{exp_days}</b> days "
+                  f"(before they'd be used up at the current ${_fmt(avg_burn)}/day burn)")
+    elif binding == "exhaustion":
+        runway = (f"credits <b>run out</b> in ~<b>{int(exh_days) if exh_days else '—'}</b> days "
+                  f"at the current ${_fmt(avg_burn)}/day burn")
+    else:
+        runway = "projection unavailable yet (needs a day of history)"
+    credit_card = (
+        f'<div class="card"><div class="muted">Credits remaining'
+        f'{f" of ${_fmt(gr)} granted" if gr else ""}</div>'
+        f'<div class="big">${_fmt(rem)}</div>'
+        f'<div class="muted" style="font-size:12px;margin-top:6px">'
+        f'{f"${_fmt(cons)} consumed · " if cons is not None else ""}{runway}</div></div>'
+    ) if rem is not None else ""
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -185,31 +249,36 @@ def _render(data: dict) -> str:
 <body>
 <header>
   <h1>Reality Check <span class="muted">— Cloud cost</span></h1>
-  <p class="tag">Holistic daily AWS spend for this demo account, collected once a
-  day and stored in Aurora Serverless v2 (PostgreSQL).</p>
+  <p class="tag">Holistic AWS spend for this demo account, collected twice daily
+  and stored in Aurora Serverless v2 (PostgreSQL). <b>Gross</b> is the real
+  pre-credit consumption; <b>net</b> is what's actually billed after promotional
+  credits (≈$0 while credits last).</p>
   <p class="muted"><a href="/">&larr; Back to the contract-review demo</a></p>
 </header>
 <main>
   <div class="cards">
-    <div class="card"><div class="muted">Last {esc(data['window_days'])} days (unblended)</div>
-      <div class="big">${data['window_unblended_usd']:.2f}</div></div>
+    <div class="card"><div class="muted">Last {esc(data['window_days'])} days (gross usage)</div>
+      <div class="big">${data['window_gross_usd']:.2f}</div></div>
     <div class="card"><div class="muted">Last {esc(data['window_days'])} days (net, post-credit)</div>
       <div class="big">${data['window_net_usd']:.2f}</div></div>
-    <div class="card"><div class="muted">Days recorded</div>
-      <div class="big">{esc(data['days_recorded'])}</div></div>
+    {credit_card}
+    <div class="card"><div class="muted">Resources tracked</div>
+      <div class="big">{esc(data.get('resource_count', 0))}</div>
+      <div class="muted" style="font-size:12px;margin-top:6px">{esc(data['days_recorded'])} days recorded</div></div>
   </div>
 
-  <h3>Top services ({esc(data['window_days'])}-day roll-up)</h3>
-  <table><thead><tr><th>Service</th><th class="num">Unblended</th></tr></thead>
+  <h3>Top services ({esc(data['window_days'])}-day roll-up, gross)</h3>
+  <table><thead><tr><th>Service</th><th class="num">Gross usage</th></tr></thead>
   <tbody>{svc_rows}</tbody></table>
 
   <h3>Daily history</h3>
-  <table><thead><tr><th>Date (UTC)</th><th class="num">Unblended</th>
+  <table><thead><tr><th>Date (UTC)</th><th class="num">Gross</th>
   <th class="num">Net</th></tr></thead><tbody>{rows}</tbody></table>
 
-  <p class="foot">Collected daily by an AWS Lambda (Graviton) that reads Cost
-  Explorer and writes to Aurora via IAM database authentication — no stored
-  secrets. This page reads the same table through a read-only IAM role.
+  <p class="foot">Collected twice daily by an AWS Lambda (Graviton) that reads
+  Cost Explorer + the Free Tier / account-plan APIs and enumerates active
+  resources, writing to Aurora via IAM database authentication — no stored
+  secrets. This page reads the same tables through a read-only IAM role.
   <a href="/api/costs">Raw JSON</a>.</p>
 </main>
 </body></html>"""

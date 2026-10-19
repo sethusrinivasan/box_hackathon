@@ -174,8 +174,12 @@ class CostTrackerStack(Stack):
                 "AWS_REGION_NAME": self.region,
                 "LOG_LEVEL": "INFO",
                 "EMIT_METRICS": "true",   # DB connect latency / cold-resume metrics
+                "BURN_WINDOW_DAYS": "7",  # trailing window for the gross-burn average
+                # New-experience FREE plan grants $200 in promo credits; used to
+                # estimate credits-consumed. Override if the grant differs.
+                "ASSUMED_CREDIT_GRANT_USD": "200",
             },
-            description="Daily holistic AWS cost collector → Aurora (IAM-auth, native PG).",
+            description="Daily cost + credit + resource-inventory collector → Aurora (IAM-auth, native PG).",
         )
 
         # IAM db auth: connect ONLY as the dedicated db user on THIS cluster.
@@ -202,12 +206,26 @@ class CostTrackerStack(Stack):
             ],
             conditions=_connect_conditions,
         ))
-        # Cost Explorer read (holistic cost). CE actions are not resource-scopable.
+        # Read-only billing + inventory sources. All are account-wide, read-only
+        # APIs that cannot be scoped to a resource ARN:
+        #   ce:*            holistic gross/net/credit cost (billing.py)
+        #   freetier:*      plan type, credits remaining/expiry, free-tier usage
+        #   tag:GetResources + describe/list: active-resource inventory with
+        #                   creation times (resources.py). List/Describe only —
+        #                   no create/modify/delete anywhere.
         collector.add_to_role_policy(iam.PolicyStatement(
+            sid="ReadBillingAndInventory",
             actions=[
                 "ce:GetCostAndUsage",
                 "ce:GetCostForecast",
                 "ce:GetDimensionValues",
+                "freetier:GetAccountPlanState",
+                "freetier:GetFreeTierUsage",
+                "tag:GetResources",
+                "lambda:ListFunctions",
+                "rds:DescribeDBClusters",
+                "rds:DescribeDBInstances",
+                "s3:ListAllMyBuckets",
             ],
             resources=["*"],
         ))
@@ -278,19 +296,24 @@ class CostTrackerStack(Stack):
         )
         collector.grant_invoke(sched_role)
 
+        # Twice daily at 06:00 and 18:00 UTC. The 06:00 run lands after the prior
+        # UTC day has closed in Cost Explorer; the 18:00 run re-collects the same
+        # day to pick up CE's settling revisions (usage posts a few days late) and
+        # refreshes the credit balance + resource inventory intra-day. The upsert
+        # is idempotent on usage_date, so the second run overwrites with fresher
+        # numbers rather than duplicating.
         scheduler.CfnSchedule(
             self, "DailyCostSchedule",
             flexible_time_window=scheduler.CfnSchedule.FlexibleTimeWindowProperty(
                 mode="FLEXIBLE", maximum_window_in_minutes=60,
             ),
-            # 06:00 UTC daily — after the prior UTC day has fully closed in CE.
-            schedule_expression="cron(0 6 * * ? *)",
+            schedule_expression="cron(0 6,18 * * ? *)",
             target=scheduler.CfnSchedule.TargetProperty(
                 arn=collector.function_arn,
                 role_arn=sched_role.role_arn,
-                input='{"source":"daily-schedule"}',
+                input='{"source":"scheduled"}',
             ),
-            description="Daily Reality Check holistic cost collection.",
+            description="Reality Check cost + credit + inventory collection (06:00 & 18:00 UTC).",
             state="ENABLED",
         )
 
