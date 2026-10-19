@@ -20,8 +20,9 @@ import sys
 for _k in ("BOX_CLIENT_ID", "BOX_CLIENT_SECRET", "BOX_ENTERPRISE_ID",
            "BOX_CONTRACTS_FOLDER_ID", "BOX_EVIDENCE_FOLDER_ID", "BOX_REPORTS_FOLDER_ID"):
     os.environ[_k] = "leaked"
-os.environ["BOX_SECRET_ARN"] = "arn:aws:secretsmanager:us-east-2:123:secret:x"
-os.environ.setdefault("REALITY_CHECK_REPORTS_DIR", "/tmp/rc-test-reports")
+# Fake test fixtures below, not real secrets or production paths.
+os.environ["BOX_SECRET_ARN"] = "arn:aws:secretsmanager:us-east-2:123:secret:x"  # nosec B105
+os.environ.setdefault("REALITY_CHECK_REPORTS_DIR", "/tmp/rc-test-reports")  # nosec B108
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))

@@ -63,7 +63,8 @@ _log = get_logger("reality_check.web")
 
 # Reports/comments dir: /tmp in Lambda (read-only /var/task otherwise). LocalDocs
 # writes under ROOT/reports; we point ROOT's reports at /tmp via an override.
-_REPORTS_DIR = os.environ.get("REALITY_CHECK_REPORTS_DIR", "/tmp/rc-reports")
+# /tmp is the only writable dir in Lambda; env-overridable.
+_REPORTS_DIR = os.environ.get("REALITY_CHECK_REPORTS_DIR", "/tmp/rc-reports")  # nosec B108
 
 
 # ---------------------------------------------------------------------------

@@ -119,10 +119,13 @@ class _LocalBundler:
         self._cmd = cmd
 
     def try_bundle(self, output_dir: str, options) -> bool:  # noqa: ANN001
-        import subprocess
+        # CDK local bundling runs a fixed build command.
+        import subprocess  # nosec B404
         cmd = self._cmd.replace("/asset-output", output_dir)
         try:
-            subprocess.run(["bash", "-c", cmd], cwd=_REPO_ROOT, check=True)
+            # Fixed bash build command (no user input, no shell=True); partial
+            # path "bash" is the standard CDK bundler pattern.
+            subprocess.run(["bash", "-c", cmd], cwd=_REPO_ROOT, check=True)  # nosec B603 B607
             return True
         except (subprocess.CalledProcessError, FileNotFoundError):
             return False

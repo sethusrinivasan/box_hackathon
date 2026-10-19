@@ -118,8 +118,9 @@ class WebDemoStack(Stack):
             environment={
                 "LOG_LEVEL": "INFO",
                 "EMIT_METRICS": "true",
-                # /var/task is read-only in Lambda; route report/comment writes to /tmp.
-                "REALITY_CHECK_REPORTS_DIR": "/tmp/rc-reports",
+                # /var/task is read-only in Lambda; route report/comment writes
+                # to /tmp (the only writable dir in Lambda).
+                "REALITY_CHECK_REPORTS_DIR": "/tmp/rc-reports",  # nosec B108
             },
             description="Public offline Reality Check demo (no auth).",
         )
@@ -242,10 +243,13 @@ class _LocalBundler:
         self._cmd = cmd
 
     def try_bundle(self, output_dir: str, options) -> bool:  # noqa: ANN001
-        import subprocess
+        # CDK local bundling runs a fixed build command.
+        import subprocess  # nosec B404
         cmd = self._cmd.replace("/asset-output", output_dir)
         try:
-            subprocess.run(["bash", "-c", cmd], cwd=_REPO_ROOT, check=True)
+            # Fixed bash build command (no user input, no shell=True); partial
+            # path "bash" is the standard CDK bundler pattern.
+            subprocess.run(["bash", "-c", cmd], cwd=_REPO_ROOT, check=True)  # nosec B603 B607
             return True
         except (subprocess.CalledProcessError, FileNotFoundError):
             return False
