@@ -188,7 +188,9 @@ docs/contracts, evidence  demo docs (Markdown source)
 docs/box_upload/          the same docs as PDFs, ready to upload to Box
 docs/build_pdfs.py        rebuild the PDFs after editing the Markdown
 PRD.md                    product requirements
+PRESENTATION.md           pitch deck slides & speaker notes (6 slides, 3 min)
 PRESENTATION_OUTLINE.md   pitch deck outline
+docs/presentation.html    interactive presentation web deck (with presenter mode)
 ```
 
 ### Infrastructure & cost (frugal, serverless-first)

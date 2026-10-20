@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Reality Check — Contract Risk Review (Hackathon Presentation)</title>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card-bg: #151d2e;
+      --border: #23314d;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --primary: #3b82f6;
+      --primary-glow: rgba(59, 130, 246, 0.25);
+      --box-blue: #0061d5;
+      --green: #10b981;
+      --amber: #f59e0b;
+      --red: #ef4444;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      overflow: hidden;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Top bar */
+    header {
+      height: 54px;
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+      background: rgba(11, 15, 25, 0.95);
+      backdrop-filter: blur(8px);
+      z-index: 100;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 700;
+      font-size: 1.1rem;
+      letter-spacing: -0.02em;
+    }
+
+    .brand img {
+      height: 28px;
+      border-radius: 4px;
+    }
+
+    .brand span.tag {
+      font-size: 0.72rem;
+      background: rgba(59, 130, 246, 0.15);
+      color: var(--primary);
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    button {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    button:hover {
+      background: #1e293b;
+      border-color: var(--primary);
+    }
+
+    button.primary {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: #fff;
+    }
+
+    button.primary:hover {
+      background: #2563eb;
+    }
+
+    /* Main stage */
+    #deck-container {
+      flex: 1;
+      display: flex;
+      position: relative;
+      overflow: hidden;
+    }
+
+    #stage {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      position: relative;
+    }
+
+    .slide {
+      width: 100%;
+      max-width: 1100px;
+      aspect-ratio: 16 / 9;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.45);
+      padding: 48px 56px;
+      display: none;
+      flex-direction: column;
+      justify-content: space-between;
+      position: relative;
+      animation: fadeIn 0.25s ease-out;
+    }
+
+    .slide.active {
+      display: flex;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: scale(0.985); }
+      to { opacity: 1; transform: scale(1); }
+    }
+
+    .slide-header {
+      margin-bottom: 24px;
+    }
+
+    .slide-num {
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: var(--primary);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 6px;
+    }
+
+    h2 {
+      font-size: 2rem;
+      font-weight: 800;
+      letter-spacing: -0.025em;
+      line-height: 1.2;
+    }
+
+    .subtitle {
+      color: var(--text-muted);
+      font-size: 1.05rem;
+      margin-top: 6px;
+      font-weight: 400;
+    }
+
+    .slide-body {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+
+    /* Diagrams & Workflows */
+    .workflow-strip {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 20px 0;
+    }
+
+    .step-box {
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid var(--border);
+      padding: 16px 14px;
+      border-radius: 8px;
+      font-size: 0.88rem;
+      font-weight: 600;
+      text-align: center;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 80px;
+      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
+    }
+
+    .step-arrow {
+      color: var(--primary);
+      font-size: 1.25rem;
+      font-weight: 900;
+      flex-shrink: 0;
+    }
+
+    /* Cards */
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+      margin: 16px 0;
+    }
+
+    .feature-card {
+      background: rgba(15, 23, 42, 0.7);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 24px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .feature-card h3 {
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: #fff;
+    }
+
+    .feature-card p {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      line-height: 1.45;
+    }
+
+    .badge-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      background: rgba(59, 130, 246, 0.15);
+      color: var(--primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      font-size: 1.1rem;
+      margin-bottom: 4px;
+    }
+
+    /* Decision tree slide 3 */
+    .decision-container {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 24px;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 24px;
+    }
+
+    .tree-col {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .tree-node {
+      background: #1e293b;
+      border: 1px solid var(--border);
+      padding: 10px 18px;
+      border-radius: 8px;
+      font-size: 0.88rem;
+      font-weight: 600;
+      text-align: center;
+    }
+
+    .tree-node.highlight {
+      border-color: var(--primary);
+      background: rgba(59, 130, 246, 0.15);
+      color: #93c5fd;
+    }
+
+    .badge-sev {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    .badge-none { background: rgba(16, 185, 129, 0.15); color: var(--green); border: 1px solid rgba(16, 185, 129, 0.3); }
+    .badge-med { background: rgba(245, 158, 11, 0.15); color: var(--amber); border: 1px solid rgba(245, 158, 11, 0.3); }
+    .badge-high { background: rgba(239, 68, 68, 0.15); color: var(--red); border: 1px solid rgba(239, 68, 68, 0.3); }
+
+    /* Slide 4 Table */
+    .demo-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.84rem;
+      margin-top: 10px;
+    }
+
+    .demo-table th {
+      text-align: left;
+      padding: 8px 12px;
+      background: rgba(15, 23, 42, 0.9);
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border);
+      font-size: 0.76rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .demo-table td {
+      padding: 10px 12px;
+      border-bottom: 1px solid rgba(35, 49, 77, 0.5);
+    }
+
+    .demo-table tr:last-child td { border-bottom: none; }
+
+    .demo-cta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 20px;
+      padding: 14px 20px;
+      background: rgba(59, 130, 246, 0.08);
+      border: 1px dashed rgba(59, 130, 246, 0.4);
+      border-radius: 8px;
+    }
+
+    /* Presenter panel */
+    #presenter-panel {
+      width: 380px;
+      background: #0f172a;
+      border-left: 1px solid var(--border);
+      display: none;
+      flex-direction: column;
+      padding: 20px;
+      gap: 16px;
+      z-index: 90;
+    }
+
+    #presenter-panel.open {
+      display: flex;
+    }
+
+    .timer-card {
+      background: #1e293b;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px;
+      text-align: center;
+    }
+
+    .timer-val {
+      font-size: 2.2rem;
+      font-weight: 800;
+      font-variant-numeric: tabular-nums;
+      color: var(--green);
+    }
+
+    .timer-val.warning { color: var(--amber); }
+    .timer-val.danger { color: var(--red); }
+
+    .timer-label {
+      font-size: 0.74rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-top: 4px;
+    }
+
+    .notes-box {
+      flex: 1;
+      background: #1e293b;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      overflow-y: auto;
+      font-size: 0.92rem;
+      line-height: 1.55;
+      color: #e2e8f0;
+    }
+
+    .notes-box h4 {
+      color: var(--primary);
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 8px;
+    }
+
+    /* Footer */
+    footer {
+      height: 44px;
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-top: 1px solid var(--border);
+      background: var(--bg);
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+
+    .key-hints {
+      display: flex;
+      gap: 14px;
+    }
+
+    kbd {
+      background: #1e293b;
+      border: 1px solid var(--border);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.72rem;
+      font-family: inherit;
+      color: #fff;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="brand">
+      <img src="assets/reality-check.png" alt="Reality Check Logo" onerror="this.style.display='none'">
+      <span>Reality Check</span>
+      <span class="tag">Box Hackathon 2026</span>
+    </div>
+    <div class="controls">
+      <button id="btn-prev" onclick="prevSlide()">← Prev</button>
+      <span id="slide-indicator" style="font-size: 0.85rem; font-weight: 700; min-width: 45px; text-align: center;">1 / 6</span>
+      <button id="btn-next" class="primary" onclick="nextSlide()">Next →</button>
+      <button id="btn-presenter" onclick="togglePresenter()">🎙 Presenter Mode (P)</button>
+      <button onclick="toggleFullscreen()">⛶ Fullscreen (F)</button>
+    </div>
+  </header>
+
+  <div id="deck-container">
+    <main id="stage">
+
+      <!-- SLIDE 1 -->
+      <section class="slide active" data-slide="1" data-time="15">
+        <div class="slide-header">
+          <div class="slide-num">Slide 1 · The Problem · 15 Seconds</div>
+          <h2>Identify risks before making customer commitments</h2>
+          <div class="subtitle">The Fragmented Manual Process</div>
+        </div>
+        <div class="slide-body">
+          <div class="workflow-strip">
+            <div class="step-box" style="border-color: var(--primary); background: rgba(59,130,246,0.1);">
+              <span>Draft customer<br>commitment</span>
+            </div>
+            <div class="step-arrow">→</div>
+            <div class="step-box">
+              <span>Search<br>scattered docs</span>
+            </div>
+            <div class="step-arrow">→</div>
+            <div class="step-box">
+              <span>Ask<br>product team</span>
+            </div>
+            <div class="step-arrow">→</div>
+            <div class="step-box">
+              <span>Follow up<br>with ops</span>
+            </div>
+            <div class="step-arrow">→</div>
+            <div class="step-box">
+              <span>Piece together<br>answers</span>
+            </div>
+            <div class="step-arrow">→</div>
+            <div class="step-box" style="border-color: var(--red); background: rgba(239,68,68,0.1);">
+              <span>Assess risk<br>manually</span>
+            </div>
+          </div>
+          <div style="background: rgba(15,23,42,0.6); padding: 18px 24px; border-radius: 8px; border-left: 4px solid var(--amber); margin-top: 14px;">
+            <p style="font-size: 0.95rem; line-height: 1.5; color: #cbd5e1;">
+              <strong>The Gap:</strong> Sales teams make commitments on features, delivery deadlines, and performance without fast access to reliable delivery information. Risks go unnoticed until <em>after</em> the promise is made.
+            </p>
+          </div>
+        </div>
+        <div style="display:flex; justify-content:space-between; font-size:0.78rem; color:var(--text-muted);">
+          <span>Running Example: Enterprise Amazon S3 Archive Migration</span>
+          <span>Fixed Severities: High · Medium · None</span>
+        </div>
+      </section>
+
+      <!-- SLIDE 2 -->
+      <section class="slide" data-slide="2" data-time="10">
+        <div class="slide-header">
+          <div class="slide-num">Slide 2 · Architecture · 10 Seconds</div>
+          <h2>One contract in. An evidence-backed review out.</h2>
+          <div class="subtitle">Grounding Contract Promises in Verified Box Ground Truth</div>
+        </div>
+        <div class="slide-body">
+          <div class="workflow-strip" style="gap: 16px;">
+            <div class="step-box" style="flex: 1.2; text-align: left; padding: 20px;">
+              <div style="font-weight: 800; color: #fff; margin-bottom: 8px;">1. Inputs to Agent</div>
+              <p style="color: var(--primary); margin-bottom: 8px;">📄 One Draft Sales Contract</p>
+              <div style="font-size: 0.8rem; color: var(--text-muted); line-height: 1.4;">
+                <strong>Box Ground Truth:</strong><br>
+                • B1: Approved product docs<br>
+                • B2: Roadmap & release plans<br>
+                • B3: Delivery reviews & closeouts
+              </div>
+            </div>
+            <div class="step-arrow" style="font-size: 1.8rem;">➔</div>
+            <div class="step-box" style="flex: 1; border-color: var(--box-blue); background: rgba(0, 97, 213, 0.12); padding: 20px;">
+              <div style="font-weight: 800; color: #60a5fa; margin-bottom: 6px;">Reality Check</div>
+              <div style="font-size: 0.82rem; color: #cbd5e1;">Automated contract risk review engine</div>
+              <div style="margin-top: 10px; font-size: 0.72rem; color: var(--text-muted); background: rgba(0,0,0,0.3); padding: 4px 8px; border-radius: 4px;">
+                Claude on Amazon Bedrock
+              </div>
+            </div>
+            <div class="step-arrow" style="font-size: 1.8rem;">➔</div>
+            <div class="step-box" style="flex: 1.2; text-align: left; padding: 20px; border-color: var(--green); background: rgba(16, 185, 129, 0.08);">
+              <div style="font-weight: 800; color: #34d399; margin-bottom: 8px;">2. Outputs to Field</div>
+              <p style="margin-bottom: 6px;">💬 <strong>Comments on each claim</strong> right on the contract in Box</p>
+              <p>📊 <strong>One-page Risk Report PDF</strong> saved to Box reports folder</p>
+            </div>
+          </div>
+        </div>
+        <div style="font-size:0.78rem; color:var(--text-muted);">
+          Salesperson sees the evidence where they work. Human makes the commitment call.
+        </div>
+      </section>
+
+      <!-- SLIDE 3 -->
+      <section class="slide" data-slide="3" data-time="10">
+        <div class="slide-header">
+          <div class="slide-num">Slide 3 · Decision Model · 10 Seconds</div>
+          <h2>A simple decision for every claim</h2>
+          <div class="subtitle">Deterministic Severity Rules Fixed in Code — Never LLM Guesswork</div>
+        </div>
+        <div class="slide-body">
+          <div class="decision-container">
+            <div class="tree-col" style="align-items: center;">
+              <div class="tree-node highlight">Contract Claim</div>
+              <div style="color:var(--primary); font-weight:800;">↓</div>
+              <div class="tree-node">Source found in Box?</div>
+            </div>
+
+            <div class="tree-col">
+              <div style="font-size:0.75rem; color:var(--red); font-weight:700;">[ NO ]</div>
+              <div style="font-size:0.75rem; color:var(--green); font-weight:700; margin-top: 60px;">[ YES ]</div>
+            </div>
+
+            <div class="tree-col" style="flex: 1;">
+              <div class="tree-node" style="border-color: var(--red); display:flex; justify-content:space-between; align-items:center;">
+                <span>No source found in Box</span>
+                <span class="badge-sev badge-high">HIGH</span>
+              </div>
+              <div style="height: 10px;"></div>
+              <div class="tree-node highlight">Does claim match source?</div>
+            </div>
+
+            <div class="tree-col">
+              <div style="font-size:0.75rem; color:var(--green); font-weight:700;">[ YES ]</div>
+              <div style="font-size:0.75rem; color:var(--amber); font-weight:700; margin-top: 40px;">[ NO ]</div>
+            </div>
+
+            <div class="tree-col" style="flex: 1.3;">
+              <div class="tree-node" style="border-color: var(--green); display:flex; justify-content:space-between; align-items:center;">
+                <span>Supported by evidence</span>
+                <span class="badge-sev badge-none">NO RISK</span>
+              </div>
+              <div class="tree-node" style="border-color: var(--red); display:flex; justify-content:space-between; align-items:center;">
+                <span>Feature availability</span>
+                <span class="badge-sev badge-high">HIGH</span>
+              </div>
+              <div class="tree-node" style="border-color: var(--red); display:flex; justify-content:space-between; align-items:center;">
+                <span>Delivery deadline</span>
+                <span class="badge-sev badge-high">HIGH</span>
+              </div>
+              <div class="tree-node" style="border-color: var(--amber); display:flex; justify-content:space-between; align-items:center;">
+                <span>Performance commitment</span>
+                <span class="badge-sev badge-med">MEDIUM</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div style="font-size:0.78rem; color:var(--text-muted); margin-top: 8px;">
+          * Missing source does not prove claim is false — flags that it is unverified in Box records.
+        </div>
+      </section>
+
+      <!-- SLIDE 4 -->
+      <section class="slide" data-slide="4" data-time="120">
+        <div class="slide-header">
+          <div class="slide-num">Slide 4 · Live Demo · 2 Minutes</div>
+          <h2>Live demo: five claims, one review</h2>
+          <div class="subtitle">“What risks should sales see before committing?”</div>
+        </div>
+        <div class="slide-body">
+          <table class="demo-table">
+            <thead>
+              <tr>
+                <th>Proposed Commitment</th>
+                <th>Cited Box Evidence</th>
+                <th>Agent Verdict</th>
+                <th>Severity</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>§1 Encryption at rest</strong> in agreed config</td>
+                <td><strong>B1</strong> Approved Solution Guide confirms support</td>
+                <td style="color:var(--green); font-weight:600;">No risk</td>
+                <td><span class="badge-sev badge-none">NONE</span></td>
+              </tr>
+              <tr>
+                <td><strong>§2 Smart Archive Search</strong> at launch</td>
+                <td><strong>B2</strong> Roadmap lists as Exploratory (no ship date)</td>
+                <td style="color:var(--red); font-weight:600;">Feature availability risk</td>
+                <td><span class="badge-sev badge-high">HIGH</span></td>
+              </tr>
+              <tr>
+                <td><strong>§3 Migration within 30 days</strong></td>
+                <td><strong>B3</strong> Comparable 400–800 TB took 58–72 days</td>
+                <td style="color:var(--red); font-weight:600;">Delivery deadline risk</td>
+                <td><span class="badge-sev badge-high">HIGH</span></td>
+              </tr>
+              <tr>
+                <td><strong>§4 10 GB/s sustained throughput</strong></td>
+                <td><strong>B1</strong> Benchmark validates 5 GB/s in agreed setup</td>
+                <td style="color:var(--amber); font-weight:600;">Performance commitment risk</td>
+                <td><span class="badge-sev badge-med">MEDIUM</span></td>
+              </tr>
+              <tr>
+                <td><strong>§5 Direct import</strong> from LegacyVault</td>
+                <td><strong>No source</strong> found across Box evidence corpus</td>
+                <td style="color:var(--red); font-weight:600;">No source found</td>
+                <td><span class="badge-sev badge-high">HIGH</span></td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="demo-cta">
+            <div>
+              <div style="font-weight:700; color:#fff;">Live Hosted Web Demo & Canary Available</div>
+              <div style="font-size:0.8rem; color:var(--text-muted);">Lambda Function URL · Zero idle cost · Graviton2 arm64</div>
+            </div>
+            <a href="https://2c5gs4u2lsxjzi66dbxbr7iuzu0xhila.lambda-url.us-east-2.on.aws/" target="_blank" style="text-decoration:none;">
+              <button class="primary" style="padding: 10px 18px; font-size: 0.9rem;">
+                🚀 Open Live Demo Page ↗
+              </button>
+            </a>
+          </div>
+        </div>
+        <div style="font-size:0.78rem; color:var(--text-muted);">
+          Presenter notes contain the 0:00–2:00 timed walkthrough (press P).
+        </div>
+      </section>
+
+      <!-- SLIDE 5 -->
+      <section class="slide" data-slide="5" data-time="15">
+        <div class="slide-header">
+          <div class="slide-num">Slide 5 · Value · 15 Seconds</div>
+          <h2>Three benefits</h2>
+          <div class="subtitle">Immediate Intended Value for Sales & Delivery Teams</div>
+        </div>
+        <div class="slide-body">
+          <div class="grid-3">
+            <div class="feature-card">
+              <div class="badge-icon">1</div>
+              <h3>Identify risks before committing</h3>
+              <p>Surface unsupported features, unrealistic delivery deadlines, and unbenchmarked performance commitments before the customer signature.</p>
+            </div>
+            <div class="feature-card">
+              <div class="badge-icon">2</div>
+              <h3>Make informed commitments</h3>
+              <p>Arm field teams with source-backed evidence, owner dates, and comparable project histories for every proposed claim.</p>
+            </div>
+            <div class="feature-card">
+              <div class="badge-icon">3</div>
+              <h3>Reduce manual checking</h3>
+              <p>Spend less time searching scattered folders and chasing product and operations teams for ad hoc answers.</p>
+            </div>
+          </div>
+        </div>
+        <div style="font-size:0.78rem; color:var(--text-muted);">
+          Grounded in verifiable company ground truth in Box.
+        </div>
+      </section>
+
+      <!-- SLIDE 6 -->
+      <section class="slide" data-slide="6" data-time="10">
+        <div class="slide-header">
+          <div class="slide-num">Slide 6 · Vision · 10 Seconds</div>
+          <h2>Three future enhancements</h2>
+          <div class="subtitle">Natural Product Expansions Beyond V1 Scope</div>
+        </div>
+        <div class="slide-body">
+          <div class="grid-3">
+            <div class="feature-card" style="border-top: 3px solid var(--primary);">
+              <div class="badge-icon" style="background:rgba(59,130,246,0.15); color:var(--primary);">A</div>
+              <h3>Suggested wording</h3>
+              <p>Propose contract language and safe fallback terms supported directly by the verified Box evidence.</p>
+            </div>
+            <div class="feature-card" style="border-top: 3px solid var(--amber);">
+              <div class="badge-icon" style="background:rgba(245,158,11,0.15); color:var(--amber);">B</div>
+              <h3>Owner approvals</h3>
+              <p>Automatically route flagged exceptions to product or operations owners for expedited exception sign-off.</p>
+            </div>
+            <div class="feature-card" style="border-top: 3px solid var(--green);">
+              <div class="badge-icon" style="background:rgba(16, 185, 129, 0.15); color:var(--green);">C</div>
+              <h3>Continuous rechecks</h3>
+              <p>Continuously re-evaluate draft agreements when roadmaps, benchmark test figures, or capabilities update.</p>
+            </div>
+          </div>
+        </div>
+        <div style="font-size:0.78rem; color:var(--text-muted);">
+          * Clearly labeled as future enhancements, separate from the core contract-review engine.
+        </div>
+      </section>
+
+    </main>
+
+    <!-- PRESENTER PANEL -->
+    <aside id="presenter-panel">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h3 style="font-size:0.95rem; font-weight:800; color:#fff;">🎙 Presenter Notes</h3>
+        <button onclick="togglePresenter()" style="padding:2px 8px; font-size:0.75rem;">✕ Close</button>
+      </div>
+
+      <div class="timer-card">
+        <div class="timer-val" id="slide-timer">00:15</div>
+        <div class="timer-label">Slide Allocated Time</div>
+        <div style="display:flex; justify-content:center; gap:8px; margin-top:8px;">
+          <button onclick="startTimer()" style="padding:4px 10px; font-size:0.75rem;">Start</button>
+          <button onclick="pauseTimer()" style="padding:4px 10px; font-size:0.75rem;">Pause</button>
+          <button onclick="resetTimer()" style="padding:4px 10px; font-size:0.75rem;">Reset</button>
+        </div>
+      </div>
+
+      <div class="notes-box" id="notes-content">
+        <!-- Injected via JS -->
+      </div>
+    </aside>
+  </div>
+
+  <footer>
+    <div class="key-hints">
+      <span><kbd>←</kbd> <kbd>→</kbd> Navigate</span>
+      <span><kbd>P</kbd> Presenter Notes</span>
+      <span><kbd>F</kbd> Fullscreen</span>
+      <span><kbd>1</kbd>–<kbd>6</kbd> Direct Jump</span>
+    </div>
+    <div>Box Hackathon 2026 · Confidential & Proprietary</div>
+  </footer>
+
+  <script>
+    const slides = document.querySelectorAll('.slide');
+    const indicator = document.getElementById('slide-indicator');
+    const presenterPanel = document.getElementById('presenter-panel');
+    const slideTimerEl = document.getElementById('slide-timer');
+    const notesContent = document.getElementById('notes-content');
+
+    let current = 0;
+    let timerSeconds = 15;
+    let timerInterval = null;
+
+    const notesData = [
+      {
+        title: "Slide 1 Notes (15 Seconds)",
+        text: `<strong>Talk Track (15s):</strong><br><br>
+        "Sales teams frequently need to make commitments about features, delivery dates, and performance in draft contracts.<br><br>
+        Today, verifying those promises requires searching through scattered documents and chasing product and operations teams for ad hoc answers.<br><br>
+        Because that process is fragmented and slow, commitments get made before the real delivery risks are spotted. Reality Check solves this by identifying those risks <em>before</em> the commitment is signed."`
+      },
+      {
+        title: "Slide 2 Notes (10 Seconds)",
+        text: `<strong>Talk Track (10s):</strong><br><br>
+        "Reality Check takes a single draft contract and checks every commitment against the company's verified ground truth in Box—approved product docs, roadmaps, and delivery closeouts.<br><br>
+        The salesperson submits the draft and immediately sees which claims carry delivery or feature risks before committing."`
+      },
+      {
+        title: "Slide 3 Notes (10 Seconds)",
+        text: `<strong>Talk Track (10s):</strong><br><br>
+        "Every claim follows a strict, deterministic rule: if evidence confirms it, there is no risk.<br><br>
+        If a promised feature is only exploratory, or a deadline beats historical delivery times, it's flagged as High risk. Unverified claims are flagged as High.<br><br>
+        A human reviewer always makes the final call."`
+      },
+      {
+        title: "Slide 4 Demo Walkthrough (2 Minutes)",
+        text: `<strong>Timed Demo Walkthrough (120s):</strong><br><br>
+        • <strong>0:00–0:20 | Draft Contract:</strong> "Here is the Northstar draft agreement. Sales is proposing 5 specific commitments: encryption, Smart Archive search at launch, a 30-day migration, 10 GB/s throughput, and direct import from their legacy vault."<br><br>
+        • <strong>0:20–0:35 | Box Connection:</strong> "We submit this agreement. The agent pulls the document and cross-references our company's approved evidence folders in Box."<br><br>
+        • <strong>0:35–1:00 | Summary Results:</strong> "Instantly, we get a clear verdict: 1 claim supported with No Risk, 3 Risks Identified, and 1 No Source Found."<br><br>
+        • <strong>1:00–1:30 | Delivery Deadline Risk:</strong> "Looking at Section 3, sales promised migration within 30 days. But our delivery review in Box shows comparable 400 to 800 terabyte migrations took 58 to 72 days. This is flagged High before anyone commits."<br><br>
+        • <strong>1:30–1:50 | Feature & Missing Sources:</strong> "Section 1 encryption is verified by documentation. But Section 2 Smart Search is only exploratory on the roadmap, and Section 5 LegacyVault import has zero supporting documentation in Box—both flagged High."<br><br>
+        • <strong>1:50–2:00 | Report:</strong> "The rep gets inline comments directly on the Box document and a 1-page risk report PDF ready for review."`
+      },
+      {
+        title: "Slide 5 Notes (15 Seconds)",
+        text: `<strong>Talk Track (15s):</strong><br><br>
+        "Reality Check delivers three concrete outcomes:<br><br>
+        First, it spots delivery, availability, and performance risks before commitments are signed.<br><br>
+        Second, it equips sales teams with factual evidence and document citations for customer discussions.<br><br>
+        And third, it saves field teams hours of manual searching and inter-department chasing."`
+      },
+      {
+        title: "Slide 6 Notes (10 Seconds)",
+        text: `<strong>Talk Track (10s):</strong><br><br>
+        "Looking ahead, we see three natural expansions: generating evidence-backed alternative wording, routing risk exceptions directly to product owners for approval, and continuously monitoring draft contracts as roadmaps update.<br><br>
+        Thank you."`
+      }
+    ];
+
+    function showSlide(index) {
+      if (index < 0 || index >= slides.length) return;
+      slides[current].classList.remove('active');
+      current = index;
+      slides[current].classList.add('active');
+      indicator.textContent = `${current + 1} / ${slides.length}`;
+
+      // Update presenter notes & timer
+      const timeSec = parseInt(slides[current].getAttribute('data-time') || '15', 10);
+      timerSeconds = timeSec;
+      updateTimerDisplay();
+      notesContent.innerHTML = `<h4>${notesData[current].title}</h4>${notesData[current].text}`;
+    }
+
+    function nextSlide() { showSlide(current + 1); }
+    function prevSlide() { showSlide(current - 1); }
+
+    function togglePresenter() {
+      presenterPanel.classList.toggle('open');
+    }
+
+    function toggleFullscreen() {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen();
+      } else {
+        document.exitFullscreen();
+      }
+    }
+
+    function updateTimerDisplay() {
+      const mins = Math.floor(timerSeconds / 60);
+      const secs = timerSeconds % 60;
+      slideTimerEl.textContent = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+      slideTimerEl.className = 'timer-val';
+      if (timerSeconds <= 5) slideTimerEl.classList.add('danger');
+      else if (timerSeconds <= 10) slideTimerEl.classList.add('warning');
+    }
+
+    function startTimer() {
+      if (timerInterval) return;
+      timerInterval = setInterval(() => {
+        if (timerSeconds > 0) {
+          timerSeconds--;
+          updateTimerDisplay();
+        } else {
+          clearInterval(timerInterval);
+          timerInterval = null;
+        }
+      }, 1000);
+    }
+
+    function pauseTimer() {
+      clearInterval(timerInterval);
+      timerInterval = null;
+    }
+
+    function resetTimer() {
+      pauseTimer();
+      const timeSec = parseInt(slides[current].getAttribute('data-time') || '15', 10);
+      timerSeconds = timeSec;
+      updateTimerDisplay();
+    }
+
+    // Keyboard controls
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') {
+        e.preventDefault();
+        nextSlide();
+      } else if (e.key === 'ArrowLeft' || e.key === 'Backspace' || e.key === 'PageUp') {
+        e.preventDefault();
+        prevSlide();
+      } else if (e.key === 'p' || e.key === 'P') {
+        togglePresenter();
+      } else if (e.key === 'f' || e.key === 'F') {
+        toggleFullscreen();
+      } else if (e.key >= '1' && e.key <= '6') {
+        showSlide(parseInt(e.key, 10) - 1);
+      }
+    });
+
+    // Initialize
+    showSlide(0);
+  </script>
+</body>
+</html>
