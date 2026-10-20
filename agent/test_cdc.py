@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime
 import io
+import json
 import os
 import shutil
 import struct
@@ -367,6 +368,76 @@ class TestDuckDbReader(unittest.TestCase):
         self.assertAlmostEqual(res["results"][0]["total_usd"], 40.0)
         self.assertEqual(res["watermark"]["last_applied_lsn"], "3000")
         mock_s3.download_file.assert_not_called()  # Verified zero download on hit!
+
+    def test_reader_web_html_interface(self):
+        from agent.cdc.reader import lambda_handler
+        with patch("agent.cdc.reader.DuckDbReader") as mock_reader_cls:
+            mock_inst = MagicMock()
+            mock_inst.get_watermark.return_value = {
+                "last_applied_lsn": "4500",
+                "last_commit_timestamp": "2026-10-19T20:00:00Z",
+                "sync_mode": "INCREMENTAL",
+            }
+            mock_reader_cls.return_value = mock_inst
+
+            # Web browser GET /
+            event = {
+                "requestContext": {"http": {"method": "GET", "path": "/"}},
+            }
+            res = lambda_handler(event, None)
+            self.assertEqual(res["statusCode"], 200)
+            self.assertIn("text/html", res["headers"]["Content-Type"])
+            self.assertIn("DuckDB Serverless Analytics Reader", res["body"])
+            self.assertIn("SQL Query (DuckDB dialect)", res["body"])
+            self.assertIn("4500", res["body"])
+
+    def test_reader_api_query_post_and_healthz(self):
+        from agent.cdc.reader import lambda_handler
+        with patch("agent.cdc.reader.DuckDbReader") as mock_reader_cls:
+            mock_inst = MagicMock()
+            mock_inst.query.return_value = {
+                "results": [{"total": 100}],
+                "columns": ["total"],
+                "row_count": 1,
+                "query_time_ms": 0.45,
+                "cache_hit": True,
+            }
+            mock_reader_cls.return_value = mock_inst
+
+            # 1. Healthz
+            event_health = {
+                "requestContext": {"http": {"method": "GET", "path": "/healthz"}},
+            }
+            res_h = lambda_handler(event_health, None)
+            self.assertEqual(res_h["statusCode"], 200)
+            self.assertIn('"engine": "duckdb"', res_h["body"])
+
+            # 2. POST query
+            event_post = {
+                "requestContext": {"http": {"method": "POST", "path": "/api/query"}},
+                "body": json.dumps({"query": "SELECT 100 as total;"}),
+            }
+            res_p = lambda_handler(event_post, None)
+            self.assertEqual(res_p["statusCode"], 200)
+            data = json.loads(res_p["body"])
+            self.assertEqual(data["row_count"], 1)
+            self.assertEqual(data["results"][0]["total"], 100)
+            self.assertTrue(data["cache_hit"])
+
+    def test_reader_error_handling(self):
+        from agent.cdc.reader import lambda_handler
+        with patch("agent.cdc.reader.DuckDbReader") as mock_reader_cls:
+            mock_inst = MagicMock()
+            mock_inst.query.side_effect = Exception("Syntax error near 'FROMM'")
+            mock_reader_cls.return_value = mock_inst
+
+            event = {
+                "requestContext": {"http": {"method": "POST", "path": "/"}},
+                "body": json.dumps({"query": "SELECT * FROMM daily_cost;"}),
+            }
+            res = lambda_handler(event, None)
+            self.assertEqual(res["statusCode"], 500)
+            self.assertIn("Syntax error", res["body"])
 
 
 if __name__ == "__main__":
