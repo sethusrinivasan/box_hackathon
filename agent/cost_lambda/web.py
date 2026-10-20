@@ -24,6 +24,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import select
 import time
 
 import boto3
@@ -42,6 +43,55 @@ DAYS = int(os.environ.get("COST_WINDOW_DAYS", "30"))
 _rds = boto3.client("rds", region_name=REGION)
 
 
+def _connect_phased(conninfo: str, timeout_sec: float = 12.0) -> tuple[psycopg.Connection, dict[str, float]]:
+    """Connect via libpq nonblocking generator, tracking TCP, TLS, and IAM auth phases."""
+    from psycopg import pq
+    t_start = time.perf_counter()
+    pgconn = pq.PGconn.connect_start(conninfo.encode("utf-8"))
+    t_tcp = 0.0
+    t_tls = 0.0
+    t_auth = 0.0
+    t_tls_start = None
+    t_auth_start = None
+    deadline = t_start + timeout_sec
+    while True:
+        now = time.perf_counter()
+        if now > deadline:
+            raise psycopg.OperationalError("connection timed out")
+        st = pgconn.connect_poll()
+        status = pgconn.status
+        now = time.perf_counter()
+        if status == pq.ConnStatus.SSL_STARTUP and t_tls_start is None:
+            t_tls_start = now
+            t_tcp = (t_tls_start - t_start) * 1000
+        elif status == pq.ConnStatus.AWAITING_RESPONSE and t_auth_start is None:
+            t_auth_start = now
+            if t_tls_start:
+                t_tls = (t_auth_start - t_tls_start) * 1000
+            else:
+                t_tcp = (t_auth_start - t_start) * 1000
+        if st == pq.PollingStatus.OK:
+            t_auth = (time.perf_counter() - (t_auth_start or t_start)) * 1000
+            break
+        elif st == pq.PollingStatus.FAILED:
+            err = pgconn.get_error_message("utf-8")
+            raise psycopg.OperationalError(f"connection failed: {err}")
+        elif st == pq.PollingStatus.READING:
+            r, _, _ = select.select([pgconn.socket], [], [], max(0.1, deadline - now))
+            if not r and time.perf_counter() > deadline:
+                raise psycopg.OperationalError("connection timed out while reading")
+        elif st == pq.PollingStatus.WRITING:
+            _, w, _ = select.select([], [pgconn.socket], [], max(0.1, deadline - now))
+            if not w and time.perf_counter() > deadline:
+                raise psycopg.OperationalError("connection timed out while writing")
+    pgconn.nonblocking = 1
+    return psycopg.Connection(pgconn), {
+        "tcp_ms": round(t_tcp, 1),
+        "tls_ms": round(t_tls, 1),
+        "auth_ms": round(t_auth, 1),
+    }
+
+
 def _connect(tracker: LatencyTracker | None = None) -> psycopg.Connection:
     """Connect with native PG + IAM token. Aurora Serverless v2 auto-pauses when
     idle and takes up to ~15s to resume on the first connection, so we retry
@@ -56,19 +106,32 @@ def _connect(tracker: LatencyTracker | None = None) -> psycopg.Connection:
         if tracker:
             tracker.record("AWS RDS", "rds:generate_db_auth_token", (time.perf_counter() - t0) * 1000)
         try:
-            t0 = time.perf_counter()
-            conn = psycopg.connect(
-                host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_IAM_USER,
-                password=token, sslmode="verify-full", sslrootcert=certifi.where(),
-                connect_timeout=10,
+            conninfo = (
+                f"host={DB_HOST} port={DB_PORT} dbname={DB_NAME} user={DB_IAM_USER} "
+                f"password={token} sslmode=verify-full sslrootcert={certifi.where()} "
+                f"connect_timeout=10"
             )
+            t0 = time.perf_counter()
+            try:
+                conn, phases = _connect_phased(conninfo)
+            except Exception:
+                conn = psycopg.connect(
+                    host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_IAM_USER,
+                    password=token, sslmode="verify-full", sslrootcert=certifi.where(),
+                    connect_timeout=10,
+                )
+                total_dur = (time.perf_counter() - t0) * 1000
+                phases = {"tcp_ms": 0.0, "tls_ms": total_dur * 0.4, "auth_ms": total_dur * 0.6}
+
             elapsed_ms = (time.perf_counter() - started) * 1000
             is_cold = attempt > 0 or elapsed_ms > 2500
             if tracker:
                 tracker.cold_resume = is_cold
-                op_name = ("psycopg:connect (TLS + IAM auth - cold resume)"
-                           if is_cold else "psycopg:connect (TLS + IAM auth)")
-                tracker.record("Amazon Aurora PostgreSQL", op_name, (time.perf_counter() - t0) * 1000)
+                cold_tag = " (cold resume)" if is_cold else ""
+                if phases["tcp_ms"] > 1.0:
+                    tracker.record("Amazon Aurora PostgreSQL", f"psycopg:connect [TCP connect]{cold_tag}", phases["tcp_ms"])
+                tracker.record("Amazon Aurora PostgreSQL", f"psycopg:connect [TLS handshake]{cold_tag}", phases["tls_ms"])
+                tracker.record("Amazon Aurora PostgreSQL", f"psycopg:connect [Server IAM auth]{cold_tag}", phases["auth_ms"])
             emit_metric("DbConnectLatencyMs", round(elapsed_ms, 1), "Milliseconds",
                         fn="web")
             emit_metric("DbColdResume", 1 if is_cold else 0, "Count", fn="web")
