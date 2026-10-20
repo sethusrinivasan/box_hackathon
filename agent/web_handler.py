@@ -247,11 +247,19 @@ def lambda_handler(event, context=None):
     status = 500
     contract = None
     try:
-        if path in ("/", "/index.html") and method == "GET":
+        if path in ("/", "/index.html") and method in ("GET", "HEAD"):
             status = 200
+            if method == "HEAD":
+                return {"statusCode": 200,
+                        "headers": {"content-type": "text/html; charset=utf-8", "cache-control": "no-store"},
+                        "body": ""}
             return _html(200, _page_html())
-        if path == "/healthz":
+        if path == "/healthz" and method in ("GET", "HEAD"):
             status = 200
+            if method == "HEAD":
+                return {"statusCode": 200,
+                        "headers": {"content-type": "application/json", "cache-control": "no-store"},
+                        "body": ""}
             return _json(200, {"ok": True, "mode": "offline",
                                "contracts": list(_CONTRACTS)})
         if path == "/api/flag" and method == "GET":
@@ -288,9 +296,18 @@ def lambda_handler(event, context=None):
             status = 200
             return _json(200, {"contract_key": contract, "mode": "mock",
                                "live_cost_estimate": _estimate_live_cost(contract, out)})
-        if path == "/report.pdf" and method == "GET":
+        if path == "/report.pdf" and method in ("GET", "HEAD"):
             qs = event.get("queryStringParameters") or {}
             contract = (qs.get("contract") or "northstar").strip()
+            if method == "HEAD":
+                name = _CONTRACTS.get(contract)
+                if not name:
+                    return _json(404, {"error": f"no contract '{contract}'"})
+                return {"statusCode": 200,
+                        "headers": {"content-type": "application/pdf",
+                                    "content-disposition": f'inline; filename="RealityCheck-{contract}.pdf"',
+                                    "cache-control": "no-store"},
+                        "body": ""}
             resp = _report_pdf(contract)
             status = resp["statusCode"]
             return resp

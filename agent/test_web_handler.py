@@ -50,6 +50,26 @@ def test_offline_enforced_despite_env_creds():
     assert r["statusCode"] == 200, r["body"]
 
 
+def test_head_requests_return_200_empty_body():
+    # HEAD /
+    r_root = web.lambda_handler(_ev("HEAD", "/"))
+    assert r_root["statusCode"] == 200
+    assert "text/html" in r_root["headers"]["content-type"]
+    assert r_root["body"] == ""
+
+    # HEAD /healthz
+    r_health = web.lambda_handler(_ev("HEAD", "/healthz"))
+    assert r_health["statusCode"] == 200
+    assert "application/json" in r_health["headers"]["content-type"]
+    assert r_health["body"] == ""
+
+    # HEAD /report.pdf
+    r_pdf = web.lambda_handler(_ev("HEAD", "/report.pdf", qs={"contract": "northstar"}))
+    assert r_pdf["statusCode"] == 200
+    assert r_pdf["headers"]["content-type"] == "application/pdf"
+    assert r_pdf["body"] == ""
+
+
 def test_landing_page():
     r = web.lambda_handler(_ev("GET", "/"))
     assert r["statusCode"] == 200 and "text/html" in r["headers"]["content-type"]
