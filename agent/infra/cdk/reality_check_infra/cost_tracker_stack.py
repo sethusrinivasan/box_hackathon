@@ -88,18 +88,38 @@ class CostTrackerStack(Stack):
             memory_size=256,
             description="Custom-resource provider for Aurora express-config cluster.",
         )
+        # Bootstrap/read actions that cannot be tag-gated: Create runs before the
+        # tag exists; Describe is read-only; AddTags/EnableInternetAccessGateway
+        # are part of first-time setup. (RDS actions are not resource-ARN
+        # scopable to a single cluster here, hence "*".)
         provider_fn.add_to_role_policy(iam.PolicyStatement(
+            sid="RdsClusterBootstrap",
             actions=[
                 "rds:CreateDBCluster",
-                "rds:DeleteDBCluster",
                 "rds:DescribeDBClusters",
                 "rds:CreateDBInstance",       # express config creates the writer
-                "rds:DeleteDBInstance",
                 "rds:DescribeDBInstances",
                 "rds:EnableInternetAccessGateway",
                 "rds:AddTagsToResource",
             ],
             resources=["*"],
+        ))
+        # Mutating/destructive actions on an EXISTING cluster are tag-scoped
+        # (ABAC): the provider may only modify or delete clusters/instances that
+        # carry our Project tag, so it can never touch an unrelated RDS resource
+        # in the account. rds: management actions DO support aws:ResourceTag
+        # (unlike rds-db:connect), so this guard is enforceable here.
+        provider_fn.add_to_role_policy(iam.PolicyStatement(
+            sid="RdsClusterMutateTagScoped",
+            actions=[
+                "rds:ModifyDBCluster",        # enable CloudWatch log exports on update
+                "rds:DeleteDBCluster",
+                "rds:DeleteDBInstance",
+            ],
+            resources=["*"],
+            conditions={
+                "StringEquals": {"aws:ResourceTag/Project": "RealityCheck"}
+            },
         ))
         provider_fn.add_to_role_policy(iam.PolicyStatement(
             actions=["iam:CreateServiceLinkedRole"], resources=["*"],
@@ -154,25 +174,58 @@ class CostTrackerStack(Stack):
                 "AWS_REGION_NAME": self.region,
                 "LOG_LEVEL": "INFO",
                 "EMIT_METRICS": "true",   # DB connect latency / cold-resume metrics
+                "BURN_WINDOW_DAYS": "7",  # trailing window for the gross-burn average
+                # New-experience FREE plan grants $200 in promo credits; used to
+                # estimate credits-consumed. Override if the grant differs.
+                "ASSUMED_CREDIT_GRANT_USD": "200",
             },
-            description="Daily holistic AWS cost collector → Aurora (IAM-auth, native PG).",
+            description="Daily cost + credit + resource-inventory collector → Aurora (IAM-auth, native PG).",
         )
 
         # IAM db auth: connect ONLY as the dedicated db user on THIS cluster.
+        # The resource ARN already pins both the cluster (immutable
+        # DbiResourceId — stronger than a tag, which is mutable/spoofable) and
+        # the db user. We additionally require the target to live in THIS
+        # account and region: rds-db:connect exposes no service-specific or tag
+        # condition keys (see AWS service-authorization reference), so these
+        # supported global keys are the correct defense-in-depth guard against a
+        # cross-account/region resource-id collision or confused-deputy path.
         # ARN: arn:aws:rds-db:region:acct:dbuser:<DbiResourceId>/<user>
+        _connect_conditions = {
+            "StringEquals": {
+                "aws:ResourceAccount": self.account,
+                "aws:RequestedRegion": self.region,
+            }
+        }
         collector.add_to_role_policy(iam.PolicyStatement(
+            sid="ConnectCostCollectorDbUserOnly",
             actions=["rds-db:connect"],
             resources=[
                 f"arn:aws:rds-db:{self.region}:{self.account}:dbuser:"
                 f"{db_resource_id}/{db_iam_user}"
             ],
+            conditions=_connect_conditions,
         ))
-        # Cost Explorer read (holistic cost). CE actions are not resource-scopable.
+        # Read-only billing + inventory sources. All are account-wide, read-only
+        # APIs that cannot be scoped to a resource ARN:
+        #   ce:*            holistic gross/net/credit cost (billing.py)
+        #   freetier:*      plan type, credits remaining/expiry, free-tier usage
+        #   tag:GetResources + describe/list: active-resource inventory with
+        #                   creation times (resources.py). List/Describe only —
+        #                   no create/modify/delete anywhere.
         collector.add_to_role_policy(iam.PolicyStatement(
+            sid="ReadBillingAndInventory",
             actions=[
                 "ce:GetCostAndUsage",
                 "ce:GetCostForecast",
                 "ce:GetDimensionValues",
+                "freetier:GetAccountPlanState",
+                "freetier:GetFreeTierUsage",
+                "tag:GetResources",
+                "lambda:ListFunctions",
+                "rds:DescribeDBClusters",
+                "rds:DescribeDBInstances",
+                "s3:ListAllMyBuckets",
             ],
             resources=["*"],
         ))
@@ -212,12 +265,20 @@ class CostTrackerStack(Stack):
             },
             description="Public Cloud-cost web view (read-only, IAM-auth, native PG).",
         )
+        # Public web view: can connect ONLY as the read-only cost_reader user on
+        # THIS cluster (SELECT-only on daily_cost at the DB layer), and only when
+        # the target is in this account/region. It has no other permissions —
+        # no rds:Describe*, no ce:*, no secrets — so it cannot reach any other
+        # data in the account. This is the tightest grant the public surface can
+        # have while still reading its one table.
         cost_web.add_to_role_policy(iam.PolicyStatement(
+            sid="ConnectCostReaderDbUserOnly",
             actions=["rds-db:connect"],
             resources=[
                 f"arn:aws:rds-db:{self.region}:{self.account}:dbuser:"
                 f"{db_resource_id}/{db_reader_user}"
             ],
+            conditions=_connect_conditions,
         ))
         cost_web_url = cost_web.add_function_url(
             auth_type=lambda_.FunctionUrlAuthType.NONE,
@@ -235,19 +296,24 @@ class CostTrackerStack(Stack):
         )
         collector.grant_invoke(sched_role)
 
+        # Twice daily at 06:00 and 18:00 UTC. The 06:00 run lands after the prior
+        # UTC day has closed in Cost Explorer; the 18:00 run re-collects the same
+        # day to pick up CE's settling revisions (usage posts a few days late) and
+        # refreshes the credit balance + resource inventory intra-day. The upsert
+        # is idempotent on usage_date, so the second run overwrites with fresher
+        # numbers rather than duplicating.
         scheduler.CfnSchedule(
             self, "DailyCostSchedule",
             flexible_time_window=scheduler.CfnSchedule.FlexibleTimeWindowProperty(
                 mode="FLEXIBLE", maximum_window_in_minutes=60,
             ),
-            # 06:00 UTC daily — after the prior UTC day has fully closed in CE.
-            schedule_expression="cron(0 6 * * ? *)",
+            schedule_expression="cron(0 6,18 * * ? *)",
             target=scheduler.CfnSchedule.TargetProperty(
                 arn=collector.function_arn,
                 role_arn=sched_role.role_arn,
-                input='{"source":"daily-schedule"}',
+                input='{"source":"scheduled"}',
             ),
-            description="Daily Reality Check holistic cost collection.",
+            description="Reality Check cost + credit + inventory collection (06:00 & 18:00 UTC).",
             state="ENABLED",
         )
 

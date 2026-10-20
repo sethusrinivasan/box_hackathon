@@ -36,3 +36,6 @@ cdk.out/
 
 # Offline review reports
 reports/
+
+# Generated pgvector evidence corpus (regenerate: data/generate_evidence_corpus.py)
+docs/evidence_corpus/
