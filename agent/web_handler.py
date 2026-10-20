@@ -731,12 +731,14 @@ function render(key, r){
     h += `<th style="padding:4px 6px; width:35%">Share</th>`;
     h += `</tr></thead><tbody>`;
     (b.services || []).forEach(s => {
-      const ops = Object.entries(s.operations || {}).map(([op, n]) => `${op} (${n})`).join(', ');
-      h += `<tr style="border-bottom:1px solid rgba(255,255,255,0.05)">`;
-      h += `<td style="padding:6px 6px"><strong>${esc(s.service)}</strong><br><span class="muted" style="font-size:11px">${esc(ops)}</span></td>`;
-      h += `<td style="padding:6px 6px">${esc(s.calls)}</td>`;
-      h += `<td style="padding:6px 6px">${esc(s.total_ms)} ms</td>`;
-      h += `<td style="padding:6px 6px">`;
+      const subOps = s.sub_operations || [];
+      const opsStr = (!subOps.length) ? Object.entries(s.operations || {}).map(([op, n]) => `${op} (${n})`).join(', ') : '';
+      const opsHint = opsStr ? `<br><span class="muted" style="font-size:11px">${esc(opsStr)}</span>` : '';
+      h += `<tr style="border-bottom:1px solid rgba(255,255,255,0.06); background:rgba(255,255,255,0.015)">`;
+      h += `<td style="padding:7px 6px"><strong>${esc(s.service)}</strong>${opsHint}</td>`;
+      h += `<td style="padding:7px 6px; text-align:center"><strong>${esc(s.calls)}</strong></td>`;
+      h += `<td style="padding:7px 6px; text-align:right"><strong>${esc(s.total_ms)} ms</strong></td>`;
+      h += `<td style="padding:7px 6px">`;
       h += `<div style="display:flex; align-items:center; gap:8px">`;
       h += `<div style="flex:1; background:#21262d; border-radius:4px; height:8px; overflow:hidden">`;
       h += `<div style="width:${Math.min(100, s.percent)}%; background:var(--accent); height:8px"></div>`;
@@ -744,6 +746,21 @@ function render(key, r){
       h += `<span style="font-size:11px; width:36px; text-align:right">${esc(s.percent)}%</span>`;
       h += `</div></td>`;
       h += `</tr>`;
+      subOps.forEach(sub => {
+        const subPct = sub.percent_of_service || 0;
+        h += `<tr style="border-bottom:1px solid rgba(255,255,255,0.03); color:var(--muted); font-size:11px">`;
+        h += `<td style="padding:4px 6px 4px 18px"><span style="color:#58a6ff; opacity:0.8; margin-right:4px">↳</span> ${esc(sub.operation)}</td>`;
+        h += `<td style="padding:4px 6px; text-align:center">${esc(sub.calls)}</td>`;
+        h += `<td style="padding:4px 6px; text-align:right">${esc(sub.total_ms)} ms</td>`;
+        h += `<td style="padding:4px 6px">`;
+        h += `<div style="display:flex; align-items:center; gap:8px">`;
+        h += `<div style="flex:1; background:#21262d; border-radius:3px; height:5px; overflow:hidden">`;
+        h += `<div style="width:${Math.min(100, subPct)}%; background:#8b949e; height:5px"></div>`;
+        h += `</div>`;
+        h += `<span style="font-size:10px; width:36px; text-align:right">${esc(subPct)}%</span>`;
+        h += `</div></td>`;
+        h += `</tr>`;
+      });
     });
     h += `</tbody></table></div>`;
   } else if (b) {

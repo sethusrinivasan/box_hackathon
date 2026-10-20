@@ -73,21 +73,36 @@ class LatencyTracker:
             dur = c["duration_ms"]
             total_ms += dur
             if s not in by_svc:
-                by_svc[s] = {"service": s, "calls": 0, "total_ms": 0.0, "operations": {}}
+                by_svc[s] = {"service": s, "calls": 0, "total_ms": 0.0, "operations": {}, "op_latencies": {}}
             by_svc[s]["calls"] += 1
             by_svc[s]["total_ms"] = round(by_svc[s]["total_ms"] + dur, 1)
             op = c["operation"]
             by_svc[s]["operations"][op] = by_svc[s]["operations"].get(op, 0) + 1
+            if op not in by_svc[s]["op_latencies"]:
+                by_svc[s]["op_latencies"][op] = {"calls": 0, "total_ms": 0.0}
+            by_svc[s]["op_latencies"][op]["calls"] += 1
+            by_svc[s]["op_latencies"][op]["total_ms"] = round(by_svc[s]["op_latencies"][op]["total_ms"] + dur, 1)
 
         services_list = []
         for s, data in sorted(by_svc.items(), key=lambda x: x[1]["total_ms"], reverse=True):
             pct = round((data["total_ms"] / total_ms * 100), 1) if total_ms > 0 else 0.0
+            svc_total = data["total_ms"]
+            sub_ops = []
+            for op, op_data in sorted(data["op_latencies"].items(), key=lambda x: x[1]["total_ms"], reverse=True):
+                op_pct = round((op_data["total_ms"] / svc_total * 100), 1) if svc_total > 0 else 0.0
+                sub_ops.append({
+                    "operation": op,
+                    "calls": op_data["calls"],
+                    "total_ms": op_data["total_ms"],
+                    "percent_of_service": op_pct,
+                })
             services_list.append({
                 "service": s,
                 "calls": data["calls"],
                 "total_ms": data["total_ms"],
                 "percent": pct,
                 "operations": data["operations"],
+                "sub_operations": sub_ops,
             })
 
         status = ("Aurora Serverless v2 (Cold Resume)" if self.cold_resume

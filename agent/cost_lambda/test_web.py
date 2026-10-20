@@ -44,6 +44,11 @@ def test_latency_tracker_summary():
     assert aurora["calls"] == 2
     assert aurora["total_ms"] == 110.0
     assert aurora["percent"] == round(110.0 / 120.0 * 100, 1)
+    assert len(aurora["sub_operations"]) == 2
+    assert aurora["sub_operations"][0]["operation"] == "psycopg:connect (TLS + IAM auth)"
+    assert aurora["sub_operations"][0]["total_ms"] == 90.0
+    assert aurora["sub_operations"][1]["operation"] == "Query daily_cost (30 days)"
+    assert aurora["sub_operations"][1]["total_ms"] == 20.0
 
 
 def test_latency_tracker_cold_resume_flag():
@@ -86,6 +91,10 @@ def test_render_includes_latency_breakdown():
                     "total_ms": 140.0,
                     "percent": 93.0,
                     "operations": {"psycopg:connect": 1, "Query daily_cost": 1},
+                    "sub_operations": [
+                        {"operation": "psycopg:connect (TLS + IAM auth)", "calls": 1, "total_ms": 120.0, "percent_of_service": 85.7},
+                        {"operation": "Query daily_cost (30 days)", "calls": 1, "total_ms": 20.0, "percent_of_service": 14.3},
+                    ],
                 },
                 {
                     "service": "AWS RDS",
@@ -93,6 +102,9 @@ def test_render_includes_latency_breakdown():
                     "total_ms": 10.5,
                     "percent": 7.0,
                     "operations": {"rds:generate_db_auth_token": 1},
+                    "sub_operations": [
+                        {"operation": "rds:generate_db_auth_token", "calls": 1, "total_ms": 10.5, "percent_of_service": 100.0},
+                    ],
                 },
             ],
         },
@@ -105,6 +117,10 @@ def test_render_includes_latency_breakdown():
     assert "Amazon Aurora PostgreSQL" in html
     assert "Trend (30d)" in html
     assert "<svg" in html
+    assert "↳" in html
+    assert "psycopg:connect (TLS + IAM auth)" in html
+    assert "120.0 ms" in html
+    assert "85.7%" in html
 
 
 def test_sparkline_svg_rendering():

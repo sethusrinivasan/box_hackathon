@@ -305,22 +305,41 @@ def _render(data: dict) -> str:
         status_color = "#d29922" if b.get("cold_resume") else "#3fb950"
         breakdown_rows = ""
         for s in b.get("services", []):
-            ops_str = ", ".join(f"{op} ({n})" for op, n in s.get("operations", {}).items())
             pct = s.get("percent", 0.0)
+            sub_ops = s.get("sub_operations") or []
+            ops_str = ", ".join(f"{op} ({n})" for op, n in s.get("operations", {}).items()) if not sub_ops else ""
+            ops_hint = f"<br><span class='muted' style='font-size:11px'>{esc(ops_str)}</span>" if ops_str else ""
             breakdown_rows += f"""
-            <tr style="border-bottom:1px solid rgba(255,255,255,0.05)">
-              <td style="padding:6px 8px">
-                <strong>{esc(s.get('service'))}</strong><br>
-                <span class="muted" style="font-size:11px">{esc(ops_str)}</span>
+            <tr style="border-bottom:1px solid rgba(255,255,255,0.06); background:rgba(255,255,255,0.015)">
+              <td style="padding:7px 8px">
+                <strong style="color:var(--fg)">{esc(s.get('service'))}</strong>{ops_hint}
               </td>
-              <td style="padding:6px 8px; text-align:center">{esc(s.get('calls'))}</td>
-              <td style="padding:6px 8px; text-align:right" class="num">{s.get('total_ms'):.1f} ms</td>
-              <td style="padding:6px 8px">
+              <td style="padding:7px 8px; text-align:center"><strong>{esc(s.get('calls'))}</strong></td>
+              <td style="padding:7px 8px; text-align:right" class="num"><strong>{s.get('total_ms'):.1f} ms</strong></td>
+              <td style="padding:7px 8px">
                 <div style="display:flex; align-items:center; gap:8px">
                   <div style="flex:1; background:#21262d; border-radius:4px; height:8px; overflow:hidden">
                     <div style="width:{min(100, pct)}%; background:var(--accent); height:8px"></div>
                   </div>
                   <span style="font-size:11px; width:36px; text-align:right" class="num">{pct:.1f}%</span>
+                </div>
+              </td>
+            </tr>"""
+            for sub in sub_ops:
+                sub_pct = sub.get("percent_of_service", 0.0)
+                breakdown_rows += f"""
+            <tr style="border-bottom:1px solid rgba(255,255,255,0.03); color:var(--muted); font-size:11px">
+              <td style="padding:4px 8px 4px 22px">
+                <span style="color:#58a6ff; opacity:0.8; margin-right:4px">↳</span> {esc(sub.get('operation'))}
+              </td>
+              <td style="padding:4px 8px; text-align:center">{esc(sub.get('calls'))}</td>
+              <td style="padding:4px 8px; text-align:right" class="num">{sub.get('total_ms'):.1f} ms</td>
+              <td style="padding:4px 8px">
+                <div style="display:flex; align-items:center; gap:8px">
+                  <div style="flex:1; background:#21262d; border-radius:3px; height:5px; overflow:hidden">
+                    <div style="width:{min(100, sub_pct)}%; background:#8b949e; height:5px"></div>
+                  </div>
+                  <span style="font-size:10px; width:36px; text-align:right" class="num">{sub_pct:.1f}%</span>
                 </div>
               </td>
             </tr>"""
