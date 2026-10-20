@@ -109,6 +109,27 @@ Service-level, support, security, and compliance reviews are outside V1.
 
 Contract drafting, automatic contract changes, approval routing, negotiation, signature, portfolio reporting, and post-signature obligation tracking are outside V1. The report supports human judgment; it does not grant approval to sign.
 
+## Operating cost posture (non-functional)
+
+The system is built to run on a constrained budget (credits / Free Tier) for an
+extended period without out-of-pocket spend, using **foundational, frugal,
+serverless-first** AWS services only: IAM, KMS, S3, DynamoDB, Lambda, SQS, SNS,
+and Aurora Serverless v2 PostgreSQL. Principles:
+
+- **Scale to zero** wherever possible: Lambda per-invocation, on-demand data
+  stores, and Aurora Serverless v2 at min 0 ACU (auto-pause). No always-on NAT
+  gateway, no provisioned search/graph tier, no multi-AZ reader redundancy.
+- **Graviton (arm64)** compute and short (3-day) CloudWatch log retention.
+- **Cheapest viable model** (Amazon Nova Lite by default); the hosted demo runs a
+  **mock** and surfaces the estimated real-run cost rather than spending on live
+  model calls.
+- **Daily holistic cost tracking** into Aurora via a scheduled collector Lambda
+  that connects with **IAM database authentication only** (native PostgreSQL, no
+  stored secret), so spend is observable without adding meaningful cost.
+
+A known IaC limitation (Aurora express configuration has no CloudFormation
+support) and its workaround are tracked in `docs/KNOWN_ISSUES.md`.
+
 ## Success metrics
 
 **North star — Risks caught before commitment:** Percentage of expert-identified risky claims in draft contracts that the system flags before sales makes the customer commitment.

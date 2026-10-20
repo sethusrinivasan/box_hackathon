@@ -336,6 +336,59 @@ def match_contract(contracts: List[Dict[str, str]], query: str) -> Optional[Dict
     return best if best_score else None
 
 
+def _gather_sources(docs, contract_text: str) -> List[Dict[str, Any]]:
+    """Build the evidence `sources` for a review.
+
+    Default: every evidence doc, full text (unchanged behavior).
+
+    When the pgvector evidence store is enabled (EVIDENCE_STORE=on + DB config),
+    retrieve the top-k passages most relevant to this contract and pass ONLY
+    those — bounding prompt tokens and letting the corpus scale past the context
+    window. Metadata (ref/title/last_updated/link) still comes from the live doc
+    list so the report and Box comments keep working; retrieval only narrows the
+    TEXT. Any retrieval miss transparently falls back to the full corpus.
+    See docs/DESIGN_pgvector_evidence_retrieval.md.
+    """
+    # Full-corpus sources (also our fallback), keyed by B-ref.
+    full: List[Dict[str, Any]] = []
+    for i, e in enumerate(docs.evidence(), 1):
+        text = pdf_text(docs.read(e["id"]))
+        title = text.strip().splitlines()[0] if text.strip() else e["name"]
+        full.append({**e, "ref": f"B{i}", "text": text, "title": title,
+                     "last_updated": last_updated(text)})
+
+    try:
+        import evidence_store
+    except Exception:
+        return full
+    if not evidence_store.enabled():
+        return full
+    # Only engage vector retrieval once the corpus is large enough that top-k is
+    # actually smaller than the whole corpus. On a handful of docs, full-corpus
+    # is cheaper and loses nothing — retrieval would just add overhead. The win
+    # (bounded tokens, scaling past the context window) is at scale.
+    import os as _os
+    min_docs = int(_os.environ.get("EVIDENCE_MIN_DOCS", "8"))
+    if len(full) < min_docs:
+        return full
+
+    hits = evidence_store.retrieve_sources(contract_text)
+    if not hits:
+        return full  # retrieval unavailable or nothing relevant → full corpus
+
+    # Narrow each matched source's text to the retrieved passages, preserving
+    # the live metadata (link etc.). Match hits to docs by source_name/ref.
+    by_name = {s.get("name"): s for s in full}
+    by_ref = {s["ref"]: s for s in full}
+    narrowed: List[Dict[str, Any]] = []
+    for h in hits:
+        base = by_name.get(h.get("name")) or by_ref.get(h.get("ref"))
+        if not base:
+            continue
+        narrowed.append({**base, "text": h["text"]})
+    return narrowed or full
+
+
 def review_contract(docs, contract_name: str, client=None) -> Dict[str, Any]:
     # Bind a correlation id so every log line for this review shares it.
     # Respect an id a caller (e.g. the web handler) already bound.
@@ -351,11 +404,7 @@ def review_contract(docs, contract_name: str, client=None) -> Dict[str, Any]:
         return {"error": f"No contract matching '{contract_name}'.",
                 "available": [c["name"] for c in contracts]}
     contract_text = pdf_text(docs.read(contract["id"]))
-    sources = []
-    for i, e in enumerate(docs.evidence(), 1):
-        text = pdf_text(docs.read(e["id"]))
-        title = text.strip().splitlines()[0] if text.strip() else e["name"]
-        sources.append({**e, "ref": f"B{i}", "text": text, "title": title, "last_updated": last_updated(text)})
+    sources = _gather_sources(docs, contract_text)
     in_order = classify(llm_review(client or bedrock(), contract["name"], contract_text, sources))
     claims = by_severity(in_order)
     counts = summarize(claims)

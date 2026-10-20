@@ -1,18 +1,21 @@
 """
 ObservabilityStack — CloudWatch dashboard + baseline alarms for Reality Check.
 
-Visualizes three things operations actually watches:
+Visualizes what operations actually watches, one compact row per question:
   1. Lambda service health (invocations, errors, throttles, duration, concurrency)
   2. Review throughput + the Bedrock dependency (reviews, claims, invokes, tokens)
   3. Review KPIs (results by outcome, risks flagged, claim-severity mix)
   4. A synthetic hourly canary probing the live demo end-to-end
+  5. Aurora Serverless v2 cost-infra (DB connect latency, cold-resume behavior)
 
-Custom metrics live in the "RealityCheck" namespace and are emitted as EMF by
-box/telemetry.py when the Lambda runs with EMIT_METRICS=true. AWS/Lambda metrics
+App metrics live in the "RealityCheck" namespace (box/telemetry.py); cost-infra
+metrics live in "RealityCheckCost" (agent/cost_lambda/metrics.py). Both are
+emitted as EMF when the functions run with EMIT_METRICS=true. AWS/Lambda metrics
 are published automatically by the service.
 
-The dashboard is intentionally succinct: three rows of three widgets, each
-answering one operational question.
+Layout: each row is three graph widgets (height 5) followed by ONE full-width
+caption strip (height 1). CloudWatch text widgets render only a Markdown subset
+(no raw HTML), so captions are plain Markdown kept to a single dense line.
 """
 from __future__ import annotations
 
@@ -30,6 +33,7 @@ from aws_cdk import aws_sns_subscriptions as subs
 from constructs import Construct
 
 NAMESPACE = "RealityCheck"
+COST_NAMESPACE = "RealityCheckCost"
 
 # Lambda's configured timeout (agent/infra/setup.md: --timeout 60).
 LAMBDA_TIMEOUT_MS = 60_000
@@ -81,44 +85,33 @@ class ObservabilityStack(Stack):
         dashboard.add_widgets(
             cw.TextWidget(
                 markdown=(
-                    f"# Reality Check - Ops & Utilization\n"
-                    f"Lambda **`{function_name}`** - region **`{self.region}`** - "
-                    f"custom metrics namespace **`{NAMESPACE}`** "
-                    "(emitted when the Lambda runs with `EMIT_METRICS=true`).\n\n"
-                    "**Row 1 - Service health** (is the function healthy?) &nbsp;|&nbsp; "
-                    "**Row 2 - Throughput & Bedrock** (reviews run + model usage/cost) &nbsp;|&nbsp; "
-                    "**Row 3 - Review KPIs** (what the agent concluded) &nbsp;|&nbsp; "
-                    "**Row 4 - Canary** (is the live demo up?)."
+                    f"# Reality Check &mdash; Ops & Utilization\n"
+                    f"Lambda **`{function_name}`** &nbsp;·&nbsp; region **`{self.region}`** "
+                    f"&nbsp;·&nbsp; metrics **`{NAMESPACE}`** / **`{COST_NAMESPACE}`** "
+                    "(emitted when functions run with `EMIT_METRICS=true`)\n\n"
+                    "**1** Service health &nbsp;·&nbsp; **2** Throughput & Bedrock "
+                    "&nbsp;·&nbsp; **3** Review KPIs &nbsp;·&nbsp; **4** Canary "
+                    "&nbsp;·&nbsp; **5** Aurora cost-infra"
                 ),
                 width=24,
-                height=3,
+                height=2,
             )
         )
 
-        # Row 1 — Lambda health. Each widget pairs a labelled graph with a short
-        # "what/why" caption so an on-call reader needs no external doc.
+        # Row 1 — Lambda health
         dashboard.add_widgets(
             self._lambda_invocations_widget(lambda_dims),
             self._lambda_duration_widget(lambda_dims),
             self._lambda_concurrency_widget(lambda_dims),
         )
-        dashboard.add_widgets(
-            self._caption(
-                "**Invocations / Errors / Throttles**",
-                "Traffic and failure volume. Errors > 0 or any throttles means "
-                "the function is dropping work - investigate.",
-            ),
-            self._caption(
-                "**Duration p50 / p99 vs 60s timeout**",
-                "Request latency. p99 riding the red 60s line means runs are "
-                "about to time out (often slow Box AI calls).",
-            ),
-            self._caption(
-                "**Max concurrent executions**",
-                "Parallelism in use. Approaching the account concurrency limit "
-                "risks throttling; informs reserved-concurrency sizing.",
-            ),
-        )
+        dashboard.add_widgets(self._legend(
+            ("Invocations / Errors / Throttles",
+             "errors or throttles > 0 = work is being dropped"),
+            ("Duration p50 / p99 vs 60s",
+             "p99 near the red line = runs about to time out"),
+            ("Max concurrency",
+             "nearing the account limit risks throttling"),
+        ))
 
         # Row 2 — review throughput + Bedrock dependency
         dashboard.add_widgets(
@@ -126,23 +119,14 @@ class ObservabilityStack(Stack):
             self._box_ai_widget(),
             self._bedrock_widget(),
         )
-        dashboard.add_widgets(
-            self._caption(
-                "**Contract reviews run**",
-                "Review volume vs. no-match runs (contract name couldn't be "
-                "resolved to a source doc). Rising no-match = ingestion drift.",
-            ),
-            self._caption(
-                "**Claims reviewed**",
-                "How many individual claims were checked across all reviews. "
-                "The per-run workload driver for latency and token spend.",
-            ),
-            self._caption(
-                "**Bedrock invokes / failures / tokens**",
-                "Bedrock usage for the LLM review. Failures = degraded "
-                "analysis; tokens (right axis) track model spend.",
-            ),
-        )
+        dashboard.add_widgets(self._legend(
+            ("Contract reviews run",
+             "reviews vs. no-match; rising no-match = ingestion drift"),
+            ("Claims reviewed",
+             "claims checked — the latency & token-spend driver"),
+            ("Bedrock invokes / failures / tokens",
+             "failures = degraded analysis; tokens = model spend"),
+        ))
 
         # Row 3 — review KPIs
         dashboard.add_widgets(
@@ -150,48 +134,46 @@ class ObservabilityStack(Stack):
             self._human_loop_widget(),
             self._risk_mix_widget(),
         )
-        dashboard.add_widgets(
-            self._caption(
-                "**Claims by result**",
-                "No-risk vs. risk-identified vs. no-source-found, stacked. The "
-                "core outcome signal for what the agent concluded.",
-            ),
-            self._caption(
-                "**Risks flagged**",
-                "Count of claims the agent flagged as risk-identified. The "
-                "human-review workload: every flag is a deal a person must read.",
-            ),
-            self._caption(
-                "**Claim severity mix (High/Medium/None)**",
-                "Severity tier of reviewed claims. A High-heavy mix means the "
-                "pipeline is surfacing materially risky terms.",
-            ),
-        )
+        dashboard.add_widgets(self._legend(
+            ("Claims by result",
+             "no-risk / risk-identified / no-source-found"),
+            ("Risks flagged",
+             "risk-identified count = the human-review workload"),
+            ("Claim severity mix",
+             "High / Medium / None; High-heavy = risky terms"),
+        ))
 
-        # Row 4 — hourly canary (synthetic end-to-end probe of the live demo).
+        # Row 4 — hourly canary (synthetic end-to-end probe of the live demo)
         dashboard.add_widgets(
             self._canary_status_widget(),
             self._canary_latency_widget(),
             self._canary_checks_widget(),
         )
+        dashboard.add_widgets(self._legend(
+            ("Canary success / failure (hourly)",
+             "any failure = public endpoint broken, Lambda looks fine"),
+            ("Canary latency by endpoint (p90)",
+             "round-trip per route; rising = early warning"),
+            ("Canary checks pass / fail",
+             "per-endpoint, points at the broken route"),
+        ))
+
+        # Row 5 — Aurora Serverless v2 cost-infra. Tracks how long DB connects
+        # take and how often a cold resume is hit, so the resume penalty can be
+        # watched over time. Metrics come from the cost Lambdas (COST_NAMESPACE).
         dashboard.add_widgets(
-            self._caption(
-                "**Canary success / failure (hourly)**",
-                "A scheduled probe exercises the live demo end-to-end every hour. "
-                "Any failure means the public endpoint is broken even if Lambda "
-                "metrics look fine.",
-            ),
-            self._caption(
-                "**Canary latency by endpoint (p90)**",
-                "Round-trip time the probe sees for /healthz, /, /api/run, and "
-                "/report.pdf. Rising latency is an early warning.",
-            ),
-            self._caption(
-                "**Canary checks pass/fail by endpoint**",
-                "Per-endpoint pass/fail so a failure points straight at the "
-                "broken route.",
-            ),
+            self._db_connect_latency_widget(),
+            self._db_cold_resume_widget(),
+            self._db_connect_failure_widget(),
         )
+        dashboard.add_widgets(self._legend(
+            ("DB connect latency (p50 / p99)",
+             "cold resume from auto-pause spikes p99 toward ~15s"),
+            ("Cold-resume retries",
+             "connections that hit a paused cluster and retried"),
+            ("DB connect failures",
+             "should be zero; sustained = resume exceeds timeout"),
+        ))
 
         CfnOutput(
             self,
@@ -206,19 +188,16 @@ class ObservabilityStack(Stack):
     # ------------------------------------------------------------------ #
     # Widget helpers
     # ------------------------------------------------------------------ #
-    def _caption(self, title: str, body: str) -> cw.TextWidget:
-        """A collapsible caption that sits under a metric widget. Collapsed by
-        default (one thin row): the reader sees only the widget name with a
-        disclosure triangle, and expands it to read what it tracks and why.
-        CloudWatch text widgets render HTML <details>/<summary>, so this keeps
-        the dashboard compact while the explanation stays one click away."""
-        return cw.TextWidget(
-            markdown=(
-                f"<details><summary>&#9432; {title}</summary>\n\n{body}\n\n</details>"
-            ),
-            width=8,
-            height=1,
+    def _legend(self, *items: tuple[str, str]) -> cw.TextWidget:
+        """One compact, full-width caption strip for a whole row of three
+        widgets. CloudWatch text widgets only render a Markdown subset (no raw
+        HTML such as <details>), so we use plain Markdown: each item is a bold
+        title and a short note, separated by a mid-dot. A single height=1 strip
+        under the row keeps the dashboard dense while staying readable."""
+        cells = " &nbsp;&nbsp;·&nbsp;&nbsp; ".join(
+            f"**{title}** — {note}" for title, note in items
         )
+        return cw.TextWidget(markdown=cells, width=24, height=1)
 
     # ------------------------------------------------------------------ #
     # Metric helpers
@@ -246,6 +225,18 @@ class ObservabilityStack(Stack):
             color=color,
         )
 
+    def _cost_metric(self, metric_name: str, *, stat: str = "Average",
+                     label: Optional[str] = None,
+                     color: Optional[str] = None) -> cw.Metric:
+        return cw.Metric(
+            namespace=COST_NAMESPACE,
+            metric_name=metric_name,
+            statistic=stat,
+            period=Duration.hours(1),
+            label=label,
+            color=color,
+        )
+
     # ------------------------------------------------------------------ #
     # Row 1 — Lambda health
     # ------------------------------------------------------------------ #
@@ -253,7 +244,7 @@ class ObservabilityStack(Stack):
         return cw.GraphWidget(
             title="Lambda invocations & errors",
             width=8,
-            height=5,
+            height=4,
             left=[
                 self._lambda_metric("Invocations", dims),
                 self._lambda_metric("Errors", dims),
@@ -266,7 +257,7 @@ class ObservabilityStack(Stack):
         return cw.GraphWidget(
             title="Lambda duration (p50 / p99) vs 60s timeout",
             width=8,
-            height=5,
+            height=4,
             left=[
                 self._lambda_metric("Duration", dims, stat="p50"),
                 self._lambda_metric("Duration", dims, stat="p99"),
@@ -283,7 +274,7 @@ class ObservabilityStack(Stack):
         return cw.GraphWidget(
             title="Concurrency",
             width=8,
-            height=5,
+            height=4,
             left=[self._lambda_metric("ConcurrentExecutions", dims, stat="Maximum")],
             left_y_axis=cw.YAxisProps(min=0),
         )
@@ -295,7 +286,7 @@ class ObservabilityStack(Stack):
         return cw.GraphWidget(
             title="Contract reviews run",
             width=8,
-            height=5,
+            height=4,
             left=[
                 self._rc_metric("ReviewRun", label="reviews", color=BLUE),
                 self._rc_metric("ReviewNoMatch", label="no-match", color=AMBER),
@@ -307,7 +298,7 @@ class ObservabilityStack(Stack):
         return cw.GraphWidget(
             title="Claims reviewed",
             width=8,
-            height=5,
+            height=4,
             left=[
                 self._rc_metric("ReviewClaims", stat="Sum", label="claims", color=BLUE),
             ],
@@ -318,7 +309,7 @@ class ObservabilityStack(Stack):
         return cw.GraphWidget(
             title="Bedrock: invokes, failures & tokens",
             width=8,
-            height=5,
+            height=4,
             left=[
                 self._rc_metric("BedrockInvoke", label="invokes", color=BLUE),
                 self._rc_metric("BedrockInvokeFailure", label="failures", color=RED),
@@ -338,7 +329,7 @@ class ObservabilityStack(Stack):
         return cw.GraphWidget(
             title="Claims by result",
             width=8,
-            height=5,
+            height=4,
             stacked=True,
             left=[
                 self._rc_metric("ReviewResult", dims={"result": "No risk"},
@@ -355,7 +346,7 @@ class ObservabilityStack(Stack):
         return cw.GraphWidget(
             title="Risks found vs clean reviews",
             width=8,
-            height=5,
+            height=4,
             left=[
                 self._rc_metric("ReviewResult", dims={"result": "Risk identified"},
                                 stat="Sum", label="risks flagged", color=RED),
@@ -367,7 +358,7 @@ class ObservabilityStack(Stack):
         return cw.GraphWidget(
             title="Claim severity mix",
             width=8,
-            height=5,
+            height=4,
             stacked=True,
             left=[
                 self._rc_metric("ReviewSeverity", dims={"severity": "High"},
@@ -387,7 +378,7 @@ class ObservabilityStack(Stack):
         return cw.GraphWidget(
             title="Canary success / failure (hourly)",
             width=8,
-            height=5,
+            height=4,
             stacked=True,
             left=[
                 self._rc_metric("CanarySuccess", label="success", color=GREEN),
@@ -401,7 +392,7 @@ class ObservabilityStack(Stack):
         return cw.GraphWidget(
             title="Canary latency by endpoint (p90, ms)",
             width=8,
-            height=5,
+            height=4,
             left=[
                 self._rc_metric("CanaryLatencyMs", dims={"endpoint": e},
                                 stat="p90", label=e)
@@ -414,12 +405,57 @@ class ObservabilityStack(Stack):
         return cw.GraphWidget(
             title="Canary checks pass / fail",
             width=8,
-            height=5,
+            height=4,
             left=[
                 self._rc_metric("CanaryCheck", dims={"result": "pass"},
                                 label="pass", color=GREEN),
                 self._rc_metric("CanaryCheck", dims={"result": "fail"},
                                 label="fail", color=RED),
+            ],
+            left_y_axis=cw.YAxisProps(min=0),
+        )
+
+    # ------------------------------------------------------------------ #
+    # Row 5 — Aurora Serverless v2 cost-infra (RealityCheckCost namespace)
+    # ------------------------------------------------------------------ #
+    def _db_connect_latency_widget(self) -> cw.GraphWidget:
+        return cw.GraphWidget(
+            title="DB connect latency (p50 / p99) — Aurora resume",
+            width=8,
+            height=4,
+            left=[
+                self._cost_metric("DbConnectLatencyMs", stat="p50",
+                                  label="p50", color=BLUE),
+                self._cost_metric("DbConnectLatencyMs", stat="p99",
+                                  label="p99", color=AMBER),
+            ],
+            left_y_axis=cw.YAxisProps(min=0, label="ms"),
+            left_annotations=[
+                cw.HorizontalAnnotation(value=15000, label="~15s cold resume",
+                                        color=RED),
+            ],
+        )
+
+    def _db_cold_resume_widget(self) -> cw.GraphWidget:
+        return cw.GraphWidget(
+            title="Cold-resume retries",
+            width=8,
+            height=4,
+            left=[
+                self._cost_metric("DbColdResume", stat="Sum",
+                                  label="cold resumes", color=AMBER),
+            ],
+            left_y_axis=cw.YAxisProps(min=0),
+        )
+
+    def _db_connect_failure_widget(self) -> cw.GraphWidget:
+        return cw.GraphWidget(
+            title="DB connect failures",
+            width=8,
+            height=4,
+            left=[
+                self._cost_metric("DbConnectFailure", stat="Sum",
+                                  label="failures", color=RED),
             ],
             left_y_axis=cw.YAxisProps(min=0),
         )

@@ -50,6 +50,7 @@ for _p in (HERE, os.path.join(ROOT, "box")):
     sys.path.insert(0, _p)
 
 import local_agent as la          # noqa: E402 — the post-restructure runtime
+import feature_flags as ff        # noqa: E402 — SSM-backed demo feature flag
 from cost_estimate import estimate_cost  # noqa: E402 — live-path cost heads-up
 from telemetry import (           # noqa: E402 — re-wire the shared observability
     get_logger, log_event, emit_metric, set_request_id,
@@ -147,10 +148,19 @@ def _estimate_live_cost(contract_key: str, out: dict) -> dict:
 
 def _run_review(contract_key: str, *, live: bool = False) -> dict:
     name = _CONTRACTS.get(contract_key, _CONTRACTS["northstar"])
+    # Honor the feature flag: when evidence-store is ON, a real deployment's
+    # review path uses pgvector semantic retrieval (see docs/DESIGN_pgvector_*).
+    # The hosted demo is canned/offline with no DB, so here the flag drives the
+    # reported retrieval mode rather than live retrieval — but we set the env so
+    # the same code path behaves correctly if ever run with DB access.
+    retrieval_on = ff.is_enabled()
+    os.environ["EVIDENCE_STORE"] = "on" if retrieval_on else "off"
     out = la.review_contract(_TmpDocs(), name, _CannedBedrock())
     s = out.get("summary", {})
     emit_metric("WebDemoReview", 1, "Count", contract=contract_key)
     emit_metric("WebDemoRisksFound", s.get("Risk identified", 0), "Count")
+    emit_metric("WebDemoEvidenceMode", 1, "Count",
+                mode="pgvector" if retrieval_on else "full-corpus")
     result = {
         "contract": out.get("contract"),
         "summary": s,
@@ -159,6 +169,8 @@ def _run_review(contract_key: str, *, live: bool = False) -> dict:
         "report_name": out.get("report_name"),
         "comments_posted": out.get("comments_posted_on_contract"),
         "mode": "mock",
+        "evidence_retrieval": "pgvector (semantic top-k)" if retrieval_on
+                               else "full-corpus",
     }
     if live:
         # User asked for a live run: we still return the MOCK result, attach the
@@ -178,6 +190,17 @@ def _run_review(contract_key: str, *, live: bool = False) -> dict:
 # ---------------------------------------------------------------------------
 # HTTP layer (Lambda Function URL, payload format 2.0)
 # ---------------------------------------------------------------------------
+def _page_html() -> str:
+    """Render the demo page, injecting the 'Cloud cost' link when the cost web
+    view URL is configured (env COST_WEB_URL set by deploy). If unset, the link
+    is omitted so the page still works standalone."""
+    cost_url = os.environ.get("COST_WEB_URL", "").strip()
+    link = (f'<a href="{cost_url}">Cloud cost &rarr;</a> '
+            "— holistic daily AWS spend for this demo account."
+            if cost_url else "")
+    return PAGE_HTML.replace("{{COST_LINK}}", link)
+
+
 def _json(status, body):
     return {"statusCode": status,
             "headers": {"content-type": "application/json", "cache-control": "no-store"},
@@ -226,11 +249,27 @@ def lambda_handler(event, context=None):
     try:
         if path in ("/", "/index.html") and method == "GET":
             status = 200
-            return _html(200, PAGE_HTML)
+            return _html(200, _page_html())
         if path == "/healthz":
             status = 200
             return _json(200, {"ok": True, "mode": "offline",
                                "contracts": list(_CONTRACTS)})
+        if path == "/api/flag" and method == "GET":
+            # Public READ of the feature flag (reader role: ssm:GetParameter on
+            # the one param only). Used by the page to render the toggle state.
+            status = 200
+            return _json(200, {"evidence_store": ff.get_flag()})
+        if path == "/api/flag" and method == "POST":
+            # Direct FLIP from the page. The reader role holds ssm:Put/GetParameter
+            # scoped to ONLY this one parameter ARN, and set_flag writes only the
+            # normalized {on, off} — so the blast radius is a single demo boolean
+            # with no data exposure and no escalation. A calculated, restrictive
+            # trade for a one-click toggle on a public demo.
+            body = _parse_body(event)
+            out = ff.set_flag(body.get("value", "off"))
+            status = 200 if out.get("ok") else 500
+            emit_metric("WebDemoFlagFlip", 1, "Count", state=out.get("value", "?"))
+            return _json(status, out)
         if path == "/api/run" and method == "POST":
             body = _parse_body(event)
             contract = (body.get("contract") or "northstar").strip()
@@ -329,6 +368,16 @@ PAGE_HTML = """<!doctype html>
   .claim { border-left:3px solid var(--line); padding:6px 0 6px 12px; margin:10px 0; }
   .foot { color:var(--muted); font-size:12px; margin:30px 0 60px; }
   code { background:#0b0f14; padding:1px 5px; border-radius:4px; }
+  .flagrow { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+  .switch { position:relative; display:inline-block; width:46px; height:26px; flex:0 0 auto; }
+  .switch input { opacity:0; width:0; height:0; }
+  .slider { position:absolute; inset:0; cursor:pointer; background:#30363d;
+            border-radius:999px; transition:.2s; }
+  .slider:before { content:""; position:absolute; height:20px; width:20px; left:3px; top:3px;
+            background:#e6edf3; border-radius:50%; transition:.2s; }
+  input:checked + .slider { background:var(--green); }
+  input:checked + .slider:before { transform:translateX(20px); }
+  input:disabled + .slider { opacity:.5; cursor:wait; }
 </style>
 </head>
 <body>
@@ -338,8 +387,32 @@ PAGE_HTML = """<!doctype html>
   <p class="muted">The agent extracts every feature, delivery, and performance claim, checks each against
   approved docs / roadmap / delivery reviews, and flags what can't be supported — then comments the
   result on the contract itself. Everything here runs <strong>offline</strong> on synthetic data — no login.</p>
+  <p class="tag">{{COST_LINK}}</p>
 </header>
 <main>
+  <div class="card" id="flagCard">
+    <div class="flagrow">
+      <div>
+        <strong>Evidence retrieval</strong>
+        <span id="flagState" class="pill None" style="margin-left:6px">…</span>
+        <div class="muted" style="font-size:13px;margin-top:4px" id="flagDesc">
+          Loading feature flag…
+        </div>
+      </div>
+      <label class="switch" title="Toggle pgvector semantic retrieval">
+        <input type="checkbox" id="flagToggle" onchange="flipFlag(this.checked)">
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="muted" style="font-size:12px;margin-top:10px">
+      <strong>Full-corpus</strong>: every evidence doc goes into the prompt (fine for a few docs).
+      <strong>pgvector</strong>: embed the corpus once, retrieve only the top-k relevant passages per
+      review — bounded tokens, scales past the context window. Measured on a 100-doc corpus:
+      <strong>~95% fewer evidence tokens</strong>. Flag lives in SSM Parameter Store (free tier);
+      the demo is offline so this drives the <em>reported</em> mode. See the
+      <a href="https://github.com/sethusrinivasan/box_hackathon/blob/fix/gross-usage-cost/docs/DESIGN_pgvector_evidence_retrieval.md">design doc</a>.
+    </div>
+  </div>
   <div class="row">
     <button class="primary" onclick="run('northstar')">Review the Northstar archive contract</button>
     <button onclick="run('northstar-v2')">Review the v2 draft</button>
@@ -353,6 +426,37 @@ PAGE_HTML = """<!doctype html>
 const out = document.getElementById('out');
 function esc(s){ return String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 function pill(sev){ return `<span class="pill ${esc(sev)}">${sev==='None'?'OK':esc(sev)}</span>`; }
+
+// --- Feature flag (SSM-backed) --------------------------------------------
+const flagToggle = document.getElementById('flagToggle');
+const flagState  = document.getElementById('flagState');
+const flagDesc   = document.getElementById('flagDesc');
+function paintFlag(on){
+  flagToggle.checked = on;
+  flagState.textContent = on ? 'pgvector' : 'full-corpus';
+  flagState.className = 'pill ' + (on ? 'None' : 'Medium');
+  flagDesc.innerHTML = on
+    ? 'Semantic top-k retrieval is <strong>ON</strong> — reviews pull only the most relevant evidence passages.'
+    : 'Full-corpus is <strong>ON</strong> — reviews send every evidence doc to the model.';
+}
+async function loadFlag(){
+  try{ const r = await fetch('/api/flag'); const d = await r.json();
+       paintFlag(d.evidence_store === 'on'); }
+  catch(e){ flagDesc.textContent = 'Feature flag unavailable.'; }
+}
+async function flipFlag(on){
+  flagToggle.disabled = true;
+  flagDesc.textContent = 'Updating flag…';
+  try{
+    const r = await fetch('/api/flag', {method:'POST', headers:{'content-type':'application/json'},
+                                        body: JSON.stringify({value: on ? 'on' : 'off'})});
+    const d = await r.json();
+    if(!r.ok || !d.ok){ flagDesc.textContent = 'Flip failed: ' + esc(d.error || r.status); paintFlag(!on); }
+    else { paintFlag(d.value === 'on'); }
+  }catch(e){ flagDesc.textContent = 'Flip failed: ' + esc(e.message); paintFlag(!on); }
+  finally{ flagToggle.disabled = false; }
+}
+loadFlag();
 
 async function run(contract){
   out.innerHTML = '<div class="card muted">Reviewing…</div>';
@@ -371,6 +475,7 @@ function render(key, r){
   h += `<p><strong>${esc(s['Risk identified'])}</strong> of ${esc((r.claims||[]).length)} claims need attention before you commit `;
   h += `<span class="muted">· ${esc(s['No risk'])} no risk · ${esc(s['No source found'])} no source found</span></p>`;
   h += `<p class="muted">Severity: ${esc(s.severity_High)} High · ${esc(s.severity_Medium)} Medium · ${esc(s.severity_None)} None</p>`;
+  if(r.evidence_retrieval) h += `<p class="muted">Evidence retrieval: <strong>${esc(r.evidence_retrieval)}</strong></p>`;
   (r.claims||[]).forEach(c=>{
     h += `<div class="claim">${pill(c.severity)} <strong>${esc(c.result)}</strong>`;
     if(c.risk_category && c.risk_category!=='None') h += ` <span class="muted">· ${esc(c.risk_category)}</span>`;

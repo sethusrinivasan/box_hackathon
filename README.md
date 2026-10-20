@@ -176,9 +176,13 @@ capabilities change.
 
 ```
 agent/local_agent.py      the agent: chat loop, Box reads, review, comments, report
+agent/web_handler.py      public offline web demo (Lambda Function URL)
+agent/cost_estimate.py    live-path Bedrock cost estimator (mock-only hosted demo)
+agent/cost_lambda/        daily holistic cost collector → Aurora (IAM-auth, native PG)
 agent/check_config.py     preflight for Box + Bedrock
 agent/envload.py          .env loader
 agent/minipdf.py          dependency-free PDF writer (report + demo docs)
+agent/infra/cdk/          CDK: web demo, observability, and cost-tracker stacks
 box/box_client.py         Box API wrapper (boxsdk v10, CCG)
 docs/contracts, evidence  demo docs (Markdown source)
 docs/box_upload/          the same docs as PDFs, ready to upload to Box
@@ -186,6 +190,36 @@ docs/build_pdfs.py        rebuild the PDFs after editing the Markdown
 PRD.md                    product requirements
 PRESENTATION_OUTLINE.md   pitch deck outline
 ```
+
+### Infrastructure & cost (frugal, serverless-first)
+
+Three CDK stacks (`agent/infra/cdk`), all tuned for near-zero idle cost:
+
+- **RealityCheckWebDemo** — public offline demo on a Lambda Function URL. Graviton
+  (arm64), 256 MB, 3-day logs, reserved concurrency 5, and an **idle auto-shutdown**
+  (parks the function to $0 after 3 days with no invocations; manual re-enable).
+- **RealityCheckObservability** — CloudWatch dashboard + baseline alarms.
+- **RealityCheckCostTracker** — daily holistic cost collection into **Aurora
+  Serverless v2 PostgreSQL (express configuration)**: IAM-auth only, internet
+  access gateway (no VPC, no NAT), single writer, min 0 ACU (auto-pause). A
+  Graviton collector Lambda (outside any VPC) reads Cost Explorer and writes to
+  Aurora over **native PostgreSQL** using an **IAM auth token** — no stored
+  password, no Secrets Manager. Runs daily via EventBridge Scheduler.
+
+Foundational services only: IAM, KMS, S3, DynamoDB, Lambda, SQS, SNS, Aurora
+Serverless v2 Postgres. Cheapest viable model default (Amazon Nova Lite); the
+hosted demo is mock-only and shows the estimated real-run cost.
+
+One-time cost-tracker bootstrap (creates the least-privilege IAM DB role):
+
+```
+# Connect as the express admin "postgres" user with an IAM token (no password)
+TOKEN="$(aws rds generate-db-auth-token --hostname <DbEndpoint> --port 5432 \
+    --username postgres --region us-east-2)"
+PGPASSWORD="$TOKEN" psql "host=<DbEndpoint> port=5432 dbname=postgres \
+    user=postgres sslmode=require" -f agent/cost_lambda/schema.sql
+```
+
 
 Tests: `python3 agent/test_local_agent.py` and `python3 agent/test_check_config.py`
 
@@ -195,6 +229,8 @@ Tests: `python3 agent/test_local_agent.py` and `python3 agent/test_check_config.
 - [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) — components, request flow, trust boundaries.
 - [`docs/SECURITY.md`](./docs/SECURITY.md) — threat model mapped to OWASP Top 10:2025.
 - [`docs/DOC_AUDIT.md`](./docs/DOC_AUDIT.md) — documentation audit.
+- [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md) — tracked limitations & workarounds (KI-1: express-config IaC gap).
+- [`docs/aws-feature-request-express-config-cfn.md`](./docs/aws-feature-request-express-config-cfn.md) — AWS feature request write-up.
 - [`sbom.json`](./sbom.json) — CycloneDX SBOM, regenerated on every check-in.
 
 Security tooling runs on every push/PR: CodeQL + Bandit (SAST), pip-audit +
