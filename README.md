@@ -11,6 +11,7 @@
 [![OWASP Top 10:2025](https://img.shields.io/badge/OWASP-Top%2010%3A2025-success.svg)](./docs/SECURITY.md)
 [![Python 3](https://img.shields.io/badge/python-3-blue.svg)](https://www.python.org/)
 [![Live demo](https://img.shields.io/badge/live%20demo-online-3fb950.svg)](https://2c5gs4u2lsxjzi66dbxbr7iuzu0xhila.lambda-url.us-east-2.on.aws/)
+[![Presentation](https://img.shields.io/badge/presentation-deck-8b5cf6.svg)](https://sethusrinivasan.github.io/box_hackathon/)
 
 **Help sales teams identify risks before making commitments to customers.**
 
@@ -190,7 +191,8 @@ docs/build_pdfs.py        rebuild the PDFs after editing the Markdown
 PRD.md                    product requirements
 PRESENTATION.md           pitch deck slides & speaker notes (6 slides, 3 min)
 PRESENTATION_OUTLINE.md   pitch deck outline
-docs/presentation.html    interactive presentation web deck (with presenter mode)
+docs/index.html           interactive presentation web deck on GitHub Pages (with presenter mode)
+docs/presentation.html    interactive presentation web deck (standalone copy)
 ```
 
 ### Infrastructure & cost (frugal, serverless-first)
