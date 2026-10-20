@@ -48,3 +48,54 @@ def emit_metric(name: str, value: float, unit: str = "Count", **dimensions: Any)
         **dims,
     }
     sys.stdout.write(json.dumps(emf, default=str) + "\n")
+
+
+class LatencyTracker:
+    """Collects database and AWS service call latencies during request execution."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.cold_resume: bool = False
+
+    def record(self, service: str, operation: str, duration_ms: float, **extra: Any) -> None:
+        self.calls.append({
+            "service": service,
+            "operation": operation,
+            "duration_ms": round(duration_ms, 1),
+            **extra,
+        })
+
+    def summary(self) -> dict[str, Any]:
+        by_svc: dict[str, dict[str, Any]] = {}
+        total_ms = 0.0
+        for c in self.calls:
+            s = c["service"]
+            dur = c["duration_ms"]
+            total_ms += dur
+            if s not in by_svc:
+                by_svc[s] = {"service": s, "calls": 0, "total_ms": 0.0, "operations": {}}
+            by_svc[s]["calls"] += 1
+            by_svc[s]["total_ms"] = round(by_svc[s]["total_ms"] + dur, 1)
+            op = c["operation"]
+            by_svc[s]["operations"][op] = by_svc[s]["operations"].get(op, 0) + 1
+
+        services_list = []
+        for s, data in sorted(by_svc.items(), key=lambda x: x[1]["total_ms"], reverse=True):
+            pct = round((data["total_ms"] / total_ms * 100), 1) if total_ms > 0 else 0.0
+            services_list.append({
+                "service": s,
+                "calls": data["calls"],
+                "total_ms": data["total_ms"],
+                "percent": pct,
+                "operations": data["operations"],
+            })
+
+        status = ("Aurora Serverless v2 (Cold Resume)" if self.cold_resume
+                  else "Aurora Serverless v2 (Warm)")
+        return {
+            "total_ms": round(total_ms, 1),
+            "total_calls": len(self.calls),
+            "cold_resume": self.cold_resume,
+            "database_status": status,
+            "services": services_list,
+        }

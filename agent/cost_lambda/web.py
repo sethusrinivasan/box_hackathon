@@ -30,7 +30,7 @@ import boto3
 import certifi
 import psycopg
 
-from metrics import emit_metric
+from metrics import emit_metric, LatencyTracker
 
 DB_HOST = os.environ["DB_HOST"]
 DB_PORT = int(os.environ.get("DB_PORT", "5432"))
@@ -42,28 +42,36 @@ DAYS = int(os.environ.get("COST_WINDOW_DAYS", "30"))
 _rds = boto3.client("rds", region_name=REGION)
 
 
-def _connect() -> psycopg.Connection:
+def _connect(tracker: LatencyTracker | None = None) -> psycopg.Connection:
     """Connect with native PG + IAM token. Aurora Serverless v2 auto-pauses when
     idle and takes up to ~15s to resume on the first connection, so we retry
     once with a fresh token to ride through a cold resume instead of 500-ing."""
     last_exc: Exception | None = None
     started = time.perf_counter()
     for attempt in range(2):
+        t0 = time.perf_counter()
         token = _rds.generate_db_auth_token(
             DBHostname=DB_HOST, Port=DB_PORT, DBUsername=DB_IAM_USER, Region=REGION
         )
+        if tracker:
+            tracker.record("AWS RDS", "rds:generate_db_auth_token", (time.perf_counter() - t0) * 1000)
         try:
+            t0 = time.perf_counter()
             conn = psycopg.connect(
                 host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_IAM_USER,
                 password=token, sslmode="verify-full", sslrootcert=certifi.where(),
                 connect_timeout=10,
             )
-            # Instrumentation: connect latency + cold-resume retry flag, so the
-            # dashboard tracks Aurora Serverless v2 resume behavior over time.
             elapsed_ms = (time.perf_counter() - started) * 1000
+            is_cold = attempt > 0 or elapsed_ms > 2500
+            if tracker:
+                tracker.cold_resume = is_cold
+                op_name = ("psycopg:connect (TLS + IAM auth - cold resume)"
+                           if is_cold else "psycopg:connect (TLS + IAM auth)")
+                tracker.record("Amazon Aurora PostgreSQL", op_name, (time.perf_counter() - t0) * 1000)
             emit_metric("DbConnectLatencyMs", round(elapsed_ms, 1), "Milliseconds",
                         fn="web")
-            emit_metric("DbColdResume", 1 if attempt > 0 else 0, "Count", fn="web")
+            emit_metric("DbColdResume", 1 if is_cold else 0, "Count", fn="web")
             return conn
         except psycopg.OperationalError as exc:
             last_exc = exc  # likely Aurora still resuming; retry once
@@ -85,11 +93,10 @@ def _fetch_costs() -> dict:
     rows = []
     credit = {}          # latest-day credit snapshot
     resource_count = 0
-    with _connect() as conn:
+    tracker = LatencyTracker()
+    with _connect(tracker) as conn:
         with conn.cursor() as cur:
-            # GROSS pre-credit spend is the real consumption; net collapses to
-            # ~$0 while credits cover usage. gross_services is the pre-credit
-            # per-service breakdown; fall back to net `services` for old rows.
+            t0 = time.perf_counter()
             cur.execute(
                 "SELECT usage_date, gross_usd, net_usd, currency, "
                 "       COALESCE(gross_services, services), plan_type, "
@@ -98,8 +105,11 @@ def _fetch_costs() -> dict:
                 "FROM daily_cost WHERE usage_date >= %s ORDER BY usage_date DESC;",
                 (cutoff,),
             )
+            raw_rows = cur.fetchall()
+            tracker.record("Amazon Aurora PostgreSQL", "Query daily_cost (30 days)",
+                           (time.perf_counter() - t0) * 1000, row_count=len(raw_rows))
             for (d, gross, net, cur_code, services, plan_type, rem, cons,
-                 granted, expiry, projection) in cur.fetchall():
+                 granted, expiry, projection) in raw_rows:
                 rows.append({
                     "date": d.isoformat(),
                     "gross_usd": _f(gross),
@@ -119,8 +129,11 @@ def _fetch_costs() -> dict:
                     }
             # Resource inventory summary (count + newest-seen), best-effort.
             try:
+                t0 = time.perf_counter()
                 cur.execute("SELECT count(*) FROM resource_inventory;")
                 resource_count = int(cur.fetchone()[0])
+                tracker.record("Amazon Aurora PostgreSQL", "Query resource_inventory count",
+                               (time.perf_counter() - t0) * 1000)
             except Exception:  # table may not exist on a pre-migration DB
                 resource_count = 0
 
@@ -142,6 +155,7 @@ def _fetch_costs() -> dict:
         "resource_count": resource_count,
         "daily": rows,
         "top_services": [{"service": s, "usd": round(v, 4)} for s, v in top_services],
+        "latency_breakdown": tracker.summary(),
     }
 
 
@@ -193,6 +207,59 @@ def _render(data: dict) -> str:
         f"<tr><td>{esc(s['service'])}</td><td class='num'>${s['usd']:.4f}</td></tr>"
         for s in data["top_services"]
     ) or "<tr><td colspan='2' class='muted'>No service spend in this window.</td></tr>"
+
+    b = data.get("latency_breakdown") or {}
+    breakdown_html = ""
+    if b and b.get("total_calls", 0) > 0:
+        total_calls = b.get("total_calls", 0)
+        total_ms = b.get("total_ms", 0.0)
+        status_label = b.get("database_status", "Aurora Serverless v2")
+        status_color = "#d29922" if b.get("cold_resume") else "#3fb950"
+        breakdown_rows = ""
+        for s in b.get("services", []):
+            ops_str = ", ".join(f"{op} ({n})" for op, n in s.get("operations", {}).items())
+            pct = s.get("percent", 0.0)
+            breakdown_rows += f"""
+            <tr style="border-bottom:1px solid rgba(255,255,255,0.05)">
+              <td style="padding:6px 8px">
+                <strong>{esc(s.get('service'))}</strong><br>
+                <span class="muted" style="font-size:11px">{esc(ops_str)}</span>
+              </td>
+              <td style="padding:6px 8px; text-align:center">{esc(s.get('calls'))}</td>
+              <td style="padding:6px 8px; text-align:right" class="num">{s.get('total_ms'):.1f} ms</td>
+              <td style="padding:6px 8px">
+                <div style="display:flex; align-items:center; gap:8px">
+                  <div style="flex:1; background:#21262d; border-radius:4px; height:8px; overflow:hidden">
+                    <div style="width:{min(100, pct)}%; background:var(--accent); height:8px"></div>
+                  </div>
+                  <span style="font-size:11px; width:36px; text-align:right" class="num">{pct:.1f}%</span>
+                </div>
+              </td>
+            </tr>"""
+
+        breakdown_html = f"""
+        <div class="card" style="margin-top:24px; background:#0d1117; border:1px solid var(--line); border-radius:10px">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px">
+            <div>
+              <strong style="font-size:13px">⚡ AWS Service &amp; Aurora Latency Breakdown</strong>
+              <span style="display:inline-block; margin-left:8px; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; background:rgba(255,255,255,0.06); color:{status_color}">
+                {esc(status_label)}
+              </span>
+            </div>
+            <span class="muted" style="font-size:12px">{esc(total_calls)} calls · {total_ms:.1f} ms total</span>
+          </div>
+          <table style="width:100%; font-size:12px; border-collapse:collapse; margin-top:6px">
+            <thead>
+              <tr style="text-align:left; color:var(--muted); border-bottom:1px solid var(--line)">
+                <th style="padding:4px 8px">Service / Component</th>
+                <th style="padding:4px 8px; text-align:center">Calls</th>
+                <th style="padding:4px 8px; text-align:right">Latency</th>
+                <th style="padding:4px 8px; width:35%">Share</th>
+              </tr>
+            </thead>
+            <tbody>{breakdown_rows}</tbody>
+          </table>
+        </div>"""
 
     # Credit / runway card — the point of the whole view: usage is free today
     # (credits), so track gross burn and project how long credits last.
@@ -274,6 +341,8 @@ def _render(data: dict) -> str:
   <h3>Daily history</h3>
   <table><thead><tr><th>Date (UTC)</th><th class="num">Gross</th>
   <th class="num">Net</th></tr></thead><tbody>{rows}</tbody></table>
+
+  {breakdown_html}
 
   <p class="foot">Collected twice daily by an AWS Lambda (Graviton) that reads
   Cost Explorer + the Free Tier / account-plan APIs and enumerates active

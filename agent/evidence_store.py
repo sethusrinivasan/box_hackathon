@@ -39,6 +39,15 @@ CHUNK_CHARS = int(os.environ.get("EVIDENCE_CHUNK_CHARS", "1200"))
 CHUNK_OVERLAP = int(os.environ.get("EVIDENCE_CHUNK_OVERLAP", "200"))
 TOP_K = int(os.environ.get("EVIDENCE_TOP_K", "6"))
 
+try:
+    from telemetry import track_aws_call
+except ImportError:
+    from contextlib import contextmanager
+
+    @contextmanager
+    def track_aws_call(service, op, **kw):  # type: ignore[misc]
+        yield
+
 
 def enabled() -> bool:
     """True only when explicitly switched on and a DB host is configured."""
@@ -102,7 +111,8 @@ def embed(text: str) -> List[float]:
     """One Titan embedding (1024-dim, normalized) for a piece of text."""
     body = json.dumps({"inputText": text[:50000], "dimensions": EMBED_DIMS,
                        "normalize": True})
-    resp = _bedrock().invoke_model(modelId=EMBED_MODEL, body=body)
+    with track_aws_call("Amazon Bedrock", f"bedrock:InvokeModel ({EMBED_MODEL})"):
+        resp = _bedrock().invoke_model(modelId=EMBED_MODEL, body=body)
     return json.loads(resp["body"].read())["embedding"]
 
 
@@ -114,13 +124,15 @@ def _connect(user: Optional[str] = None):
     user = user or DB_USER
     last_exc: Optional[Exception] = None
     for _ in range(2):
-        token = _rds().generate_db_auth_token(
-            DBHostname=DB_HOST, Port=DB_PORT, DBUsername=user, Region=REGION)
+        with track_aws_call("AWS RDS", "rds:generate_db_auth_token"):
+            token = _rds().generate_db_auth_token(
+                DBHostname=DB_HOST, Port=DB_PORT, DBUsername=user, Region=REGION)
         try:
-            return psycopg.connect(
-                host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=user,
-                password=token, sslmode="verify-full", sslrootcert=certifi.where(),
-                connect_timeout=20)
+            with track_aws_call("Amazon Aurora PostgreSQL", "psycopg:connect (TLS + IAM auth)"):
+                return psycopg.connect(
+                    host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=user,
+                    password=token, sslmode="verify-full", sslrootcert=certifi.where(),
+                    connect_timeout=20)
         except psycopg.OperationalError as exc:
             last_exc = exc  # likely resuming; retry once
     raise last_exc  # type: ignore[misc]
@@ -147,15 +159,16 @@ def retrieve(query_text: str, k: int = TOP_K,
         qvec = _vec_literal(embed(query_text))
         with _connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT source_ref, source_name, passage, last_updated, "
-                    "       1 - (embedding <=> %s::vector) AS similarity "
-                    "FROM evidence_chunk "
-                    "ORDER BY embedding <=> %s::vector "
-                    "LIMIT %s;",
-                    (qvec, qvec, k),
-                )
-                rows = cur.fetchall()
+                with track_aws_call("Amazon Aurora PostgreSQL", "pgvector similarity search (evidence_chunk)"):
+                    cur.execute(
+                        "SELECT source_ref, source_name, passage, last_updated, "
+                        "       1 - (embedding <=> %s::vector) AS similarity "
+                        "FROM evidence_chunk "
+                        "ORDER BY embedding <=> %s::vector "
+                        "LIMIT %s;",
+                        (qvec, qvec, k),
+                    )
+                    rows = cur.fetchall()
     except Exception:
         return None  # best-effort: any failure → caller falls back
     hits = [
