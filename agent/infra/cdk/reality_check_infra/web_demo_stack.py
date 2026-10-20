@@ -38,6 +38,8 @@ from aws_cdk import (
     aws_cloudwatch_actions as cw_actions,
     aws_sns as sns,
     aws_sns_subscriptions as subs,
+    aws_s3 as s3,
+    aws_s3_deployment as s3deploy,
 )
 from constructs import Construct
 
@@ -101,6 +103,33 @@ class WebDemoStack(Stack):
         )
         log_group.grant_write(role)
 
+        # AWS-Native S3 storage for contracts, evidence, and reports
+        data_bucket = s3.Bucket(
+            self, "DataBucket",
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True,
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            enforce_ssl=True,
+        )
+
+        # Seed the bucket with baseline evidence & sample contracts
+        s3deploy.BucketDeployment(
+            self, "DeployFixtures",
+            sources=[s3deploy.Source.asset(os.path.join(_REPO_ROOT, "docs", "box_upload"))],
+            destination_bucket=data_bucket,
+        )
+
+        # Grant read & write access to the Lambda execution role
+        data_bucket.grant_read_write(role)
+
+        # Allow Bedrock invocations for live AWS-native review mode
+        role.add_to_policy(iam.PolicyStatement(
+            sid="BedrockInvokeModelAccess",
+            actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+            resources=["*"],
+        ))
+
         fn = lambda_.Function(
             self, "WebDemoFunction",
             function_name=function_name,
@@ -112,9 +141,7 @@ class WebDemoStack(Stack):
             code=lambda_.Code.from_asset(_REPO_ROOT, bundling=self._bundling()),
             role=role,
             log_group=log_group,
-            timeout=Duration.seconds(30),
-            # 256 MB is plenty for the offline review (PDF parse + canned result);
-            # halving memory halves GB-s cost with no latency impact for this path.
+            timeout=Duration.seconds(60),
             memory_size=256,
             reserved_concurrent_executions=reserved_concurrency,
             environment={
@@ -129,8 +156,11 @@ class WebDemoStack(Stack):
                 # SSM-backed feature flag the demo page reads/flips (pgvector
                 # evidence retrieval on|off). Parameter name only — no secret.
                 "EVIDENCE_FLAG_PARAM": flag_param_name,
+                # AWS-Native S3 integration
+                "REALITY_CHECK_S3_BUCKET": data_bucket.bucket_name,
+                "BEDROCK_ENABLED": "true",
             },
-            description="Public offline Reality Check demo (no auth).",
+            description="Public Reality Check demo & custom web portal.",
         )
 
         # --- Feature-flag access (scoped, calculated-risk) ------------------
@@ -165,6 +195,8 @@ class WebDemoStack(Stack):
                   description="Public demo URL (open in a browser).")
         CfnOutput(self, "WebDemoFunctionName", value=fn.function_name,
                   description="Lambda function name for the demo.")
+        CfnOutput(self, "DataBucketName", value=data_bucket.bucket_name,
+                  description="S3 bucket for AWS-native contracts, evidence, and reports.")
         CfnOutput(self, "ReEnableCommand",
                   value=(f"aws lambda put-function-concurrency "
                          f"--function-name {function_name} "

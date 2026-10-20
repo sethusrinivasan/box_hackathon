@@ -69,6 +69,14 @@ class LocalDocs:
         with open(file_id, "rb") as fh:
             return fh.read()
 
+    def upload_contract(self, name: str, data: bytes) -> Dict[str, str]:
+        folder = os.path.join(self.base, "contracts")
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, name)
+        with open(path, "wb") as fh:
+            fh.write(data)
+        return {"id": path, "name": name, "link": os.path.relpath(path, ROOT)}
+
     def upload_report(self, name: str, data: bytes) -> Dict[str, str]:
         os.makedirs(self.reports, exist_ok=True)
         path = os.path.join(self.reports, name)
@@ -107,12 +115,77 @@ class BoxDocs:
     def read(self, file_id: str) -> bytes:
         return self.client.download_bytes(file_id)
 
+    def upload_contract(self, name: str, data: bytes) -> Dict[str, str]:
+        file_id = self.client.upload_pdf(name, data, folder_id=self.contracts_folder)
+        return {"id": file_id, "name": name, "link": f"https://app.box.com/file/{file_id}"}
+
     def upload_report(self, name: str, data: bytes) -> Dict[str, str]:
         file_id = self.client.upload_pdf(name, data, folder_id=self.reports_folder)
         return {"id": file_id, "link": f"https://app.box.com/file/{file_id}"}
 
     def comment(self, file_id: str, message: str) -> str:
         return self.client.add_comment(file_id, message)
+
+
+class S3Docs:
+    kind = "s3"
+
+    def __init__(self, bucket: Optional[str] = None) -> None:
+        import boto3
+        self.s3 = boto3.client("s3", region_name=REGION)
+        self.bucket = bucket or os.environ.get("REALITY_CHECK_S3_BUCKET", "")
+        self.contracts_prefix = os.environ.get("S3_CONTRACTS_PREFIX", "contracts/")
+        self.evidence_prefix = os.environ.get("S3_EVIDENCE_PREFIX", "evidence/")
+        self.reports_prefix = os.environ.get("S3_REPORTS_PREFIX", "reports/")
+
+    def _list(self, prefix: str) -> List[Dict[str, str]]:
+        if not self.bucket:
+            return []
+        try:
+            resp = self.s3.list_objects_v2(Bucket=self.bucket, Prefix=prefix)
+            items = []
+            for obj in resp.get("Contents", []):
+                key = obj["Key"]
+                if key.endswith(".pdf") or key.endswith(".txt") or key.endswith(".md"):
+                    name = os.path.basename(key)
+                    if name:
+                        items.append({"id": key, "name": name, "link": f"s3://{self.bucket}/{key}"})
+            return sorted(items, key=lambda x: x["name"])
+        except Exception as exc:
+            log_event(_log, "s3.list_error", level=logging.ERROR, prefix=prefix, error=str(exc))
+            return []
+
+    def contracts(self) -> List[Dict[str, str]]:
+        return self._list(self.contracts_prefix)
+
+    def evidence(self) -> List[Dict[str, str]]:
+        return self._list(self.evidence_prefix)
+
+    def read(self, file_id: str) -> bytes:
+        resp = self.s3.get_object(Bucket=self.bucket, Key=file_id)
+        return resp["Body"].read()
+
+    def upload_contract(self, name: str, data: bytes) -> Dict[str, str]:
+        key = f"{self.contracts_prefix}{name}"
+        self.s3.put_object(Bucket=self.bucket, Key=key, Body=data, ContentType="application/pdf")
+        return {"id": key, "name": name, "link": f"s3://{self.bucket}/{key}"}
+
+    def upload_report(self, name: str, data: bytes) -> Dict[str, str]:
+        key = f"{self.reports_prefix}{name}"
+        self.s3.put_object(Bucket=self.bucket, Key=key, Body=data, ContentType="application/pdf")
+        return {"id": key, "link": f"s3://{self.bucket}/{key}"}
+
+    def comment(self, file_id: str, message: str) -> str:
+        base_name = os.path.basename(file_id).rsplit(".", 1)[0]
+        sidecar_key = f"{self.reports_prefix}{base_name}.comments.txt"
+        existing = ""
+        try:
+            existing = self.read(sidecar_key).decode("utf-8")
+        except Exception:
+            existing = ""
+        new_content = (existing + "\n\n" + message).strip()
+        self.s3.put_object(Bucket=self.bucket, Key=sidecar_key, Body=new_content.encode("utf-8"), ContentType="text/plain")
+        return sidecar_key
 
 
 def get_docs(offline: bool = False):
@@ -122,10 +195,13 @@ def get_docs(offline: bool = False):
     if not offline and has_auth and has_folders:
         log_event(_log, "source.selected", backend="box")
         return BoxDocs()
-    # Surface offline selection (a deployment expecting live Box but missing
-    # creds/folders silently runs on fixtures otherwise).
+    if not offline and os.environ.get("REALITY_CHECK_S3_BUCKET"):
+        log_event(_log, "source.selected", backend="s3", bucket=os.environ["REALITY_CHECK_S3_BUCKET"])
+        return S3Docs()
+    # Surface offline selection (a deployment expecting live Box/S3 but missing
+    # creds/bucket silently runs on fixtures otherwise).
     log_event(_log, "source.selected", level=logging.WARNING, backend="local",
-              reason="offline flag or Box creds/folders not set")
+              reason="offline flag or Box/S3 backend not configured")
     return LocalDocs()
 
 

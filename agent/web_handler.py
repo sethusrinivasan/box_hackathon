@@ -110,18 +110,46 @@ class _CannedBedrock:
 
 
 class _TmpDocs(la.LocalDocs):
-    """LocalDocs, but reports/comments go to a writable dir (/tmp in Lambda)."""
+    """LocalDocs, but reports/comments/uploads go to a writable dir (/tmp in Lambda)."""
 
     def __init__(self):
         super().__init__()
         self.reports = _REPORTS_DIR
+        self.custom_contracts_dir = os.path.join(_REPORTS_DIR, "contracts")
+        os.makedirs(self.custom_contracts_dir, exist_ok=True)
+
+    def contracts(self) -> List[Dict[str, str]]:
+        base_list = super().contracts()
+        if os.path.exists(self.custom_contracts_dir):
+            for n in sorted(os.listdir(self.custom_contracts_dir)):
+                if n.endswith(".pdf"):
+                    p = os.path.join(self.custom_contracts_dir, n)
+                    base_list.append({"id": p, "name": n, "link": f"/contract.pdf?contract={n.rsplit('.', 1)[0].lower()}"})
+        return base_list
+
+    def upload_contract(self, name: str, data: bytes) -> Dict[str, str]:
+        path = os.path.join(self.custom_contracts_dir, name)
+        with open(path, "wb") as fh:
+            fh.write(data)
+        return {"id": path, "name": name, "link": f"/contract.pdf?contract={name.rsplit('.', 1)[0].lower()}"}
 
 
-# Contracts the demo exposes (fixed allow-list, not arbitrary input).
+def _get_active_docs():
+    s3_bucket = os.environ.get("REALITY_CHECK_S3_BUCKET")
+    if s3_bucket:
+        try:
+            return la.S3Docs(bucket=s3_bucket)
+        except Exception as exc:
+            _log.warning(f"Failed to initialize S3Docs: {exc}; using _TmpDocs")
+    return _TmpDocs()
+
+
+# Contracts the demo exposes (dynamically expandable with user uploads).
 _CONTRACTS = {
     "northstar": "Northstar-Archive-Migration-Agreement",
     "northstar-v2": "Northstar-Archive-Migration-Agreement-v2",
 }
+_CUSTOM_CONTRACTS: dict[str, str] = {}
 
 
 def _estimate_live_cost(contract_key: str, out: dict) -> dict:
@@ -131,10 +159,10 @@ def _estimate_live_cost(contract_key: str, out: dict) -> dict:
     reflects reality. Hosted demo never calls Bedrock; this is a transparency
     heads-up on the live economics."""
     claims = out.get("claims", []) or []
-    docs = _TmpDocs()
+    docs = _get_active_docs()
     # Same text assembly the live llm_review() feeds the model.
     parts = [getattr(la, "REVIEW_SYSTEM", "")]
-    name = _CONTRACTS.get(contract_key, _CONTRACTS["northstar"])
+    name = _CUSTOM_CONTRACTS.get(contract_key) or _CONTRACTS.get(contract_key, _CONTRACTS["northstar"])
     contract = la.match_contract(docs.contracts(), name)
     if contract:
         parts.append(la.pdf_text(docs.read(contract["id"])))
@@ -147,43 +175,43 @@ def _estimate_live_cost(contract_key: str, out: dict) -> dict:
 
 
 def _run_review(contract_key: str, *, live: bool = False) -> dict:
-    name = _CONTRACTS.get(contract_key, _CONTRACTS["northstar"])
-    # Honor the feature flag: when evidence-store is ON, a real deployment's
-    # review path uses pgvector semantic retrieval (see docs/DESIGN_pgvector_*).
-    # The hosted demo is canned/offline with no DB, so here the flag drives the
-    # reported retrieval mode rather than live retrieval — but we set the env so
-    # the same code path behaves correctly if ever run with DB access.
+    name = _CUSTOM_CONTRACTS.get(contract_key) or _CONTRACTS.get(contract_key, _CONTRACTS["northstar"])
+    docs = _get_active_docs()
     retrieval_on = ff.is_enabled()
     os.environ["EVIDENCE_STORE"] = "on" if retrieval_on else "off"
-    out = la.review_contract(_TmpDocs(), name, _CannedBedrock())
+
+    client = None
+    use_live_bedrock = live or os.environ.get("BEDROCK_ENABLED") == "true"
+    if use_live_bedrock:
+        try:
+            client = la.bedrock()
+        except Exception as exc:
+            _log.warning(f"Bedrock invocation failed ({exc}); falling back to deterministic review")
+            client = _CannedBedrock()
+    else:
+        client = _CannedBedrock()
+
+    out = la.review_contract(docs, name, client)
     s = out.get("summary", {})
     emit_metric("WebDemoReview", 1, "Count", contract=contract_key)
     emit_metric("WebDemoRisksFound", s.get("Risk identified", 0), "Count")
     emit_metric("WebDemoEvidenceMode", 1, "Count",
                 mode="pgvector" if retrieval_on else "full-corpus")
+    is_live = client != _CannedBedrock and not isinstance(client, _CannedBedrock)
     result = {
         "contract": out.get("contract"),
+        "contract_key": contract_key,
         "summary": s,
         "claims": out.get("claims", []),
         "sources": out.get("sources", []),
         "report_name": out.get("report_name"),
         "comments_posted": out.get("comments_posted_on_contract"),
-        "mode": "mock",
+        "mode": "live (bedrock)" if is_live else "mock",
         "evidence_retrieval": "pgvector (semantic top-k)" if retrieval_on
                                else "full-corpus",
     }
-    if live:
-        # User asked for a live run: we still return the MOCK result, attach the
-        # estimated real-run cost, and tell them how to run it for real.
-        result["mode"] = "mock (live requested)"
+    if live or not is_live:
         result["live_cost_estimate"] = _estimate_live_cost(contract_key, out)
-        result["live_notice"] = (
-            "This hosted demo always runs a mock (offline, $0). The estimate "
-            "above is what one real Bedrock review would cost on the configured "
-            "model. For a real run, clone the repo and supply your own AWS "
-            "credentials: https://github.com/sethusrinivasan/box_hackathon"
-        )
-        emit_metric("WebDemoLiveRequested", 1, "Count", contract=contract_key)
     return result
 
 
@@ -296,11 +324,59 @@ def lambda_handler(event, context=None):
             status = 200
             return _json(200, {"contract_key": contract, "mode": "mock",
                                "live_cost_estimate": _estimate_live_cost(contract, out)})
+        if path == "/api/upload" and method == "POST":
+            body = _parse_body(event)
+            filename = (body.get("filename") or body.get("name") or "uploaded-contract.pdf").strip()
+            import re
+            safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", os.path.basename(filename))
+            if not safe_name.lower().endswith(".pdf"):
+                safe_name += ".pdf"
+            raw_b64 = body.get("data") or body.get("content") or ""
+            if not raw_b64:
+                return _json(400, {"error": "missing base64 'data' in request body"})
+            try:
+                pdf_bytes = base64.b64decode(raw_b64)
+            except Exception as e:
+                return _json(400, {"error": f"invalid base64 encoding: {e}"})
+
+            docs = _get_active_docs()
+            info = docs.upload_contract(safe_name, pdf_bytes)
+            contract_key = safe_name.rsplit(".", 1)[0].lower()
+            _CUSTOM_CONTRACTS[contract_key] = safe_name
+            status = 200
+            emit_metric("WebDemoContractUpload", 1, "Count", contract=contract_key)
+            return _json(200, {
+                "ok": True,
+                "contract_key": contract_key,
+                "name": safe_name,
+                "size_bytes": len(pdf_bytes),
+                "link": info.get("link", f"/contract.pdf?contract={contract_key}"),
+            })
+        if path == "/api/contracts" and method == "GET":
+            status = 200
+            items = [{"key": k, "name": v} for k, v in _CONTRACTS.items()]
+            items.extend([{"key": k, "name": v} for k, v in _CUSTOM_CONTRACTS.items()])
+            return _json(200, {"contracts": items})
+        if path == "/contract.pdf" and method in ("GET", "HEAD"):
+            qs = event.get("queryStringParameters") or {}
+            contract = (qs.get("contract") or "northstar").strip()
+            if method == "HEAD":
+                name = _CUSTOM_CONTRACTS.get(contract) or _CONTRACTS.get(contract)
+                if not name:
+                    return _json(404, {"error": f"no contract '{contract}'"})
+                return {"statusCode": 200,
+                        "headers": {"content-type": "application/pdf",
+                                    "content-disposition": f'inline; filename="{contract}.pdf"',
+                                    "cache-control": "no-store"},
+                        "body": ""}
+            resp = _contract_pdf(contract)
+            status = resp["statusCode"]
+            return resp
         if path == "/report.pdf" and method in ("GET", "HEAD"):
             qs = event.get("queryStringParameters") or {}
             contract = (qs.get("contract") or "northstar").strip()
             if method == "HEAD":
-                name = _CONTRACTS.get(contract)
+                name = _CUSTOM_CONTRACTS.get(contract) or _CONTRACTS.get(contract)
                 if not name:
                     return _json(404, {"error": f"no contract '{contract}'"})
                 return {"statusCode": 200,
@@ -329,8 +405,8 @@ def lambda_handler(event, context=None):
 def _report_pdf(contract_key: str) -> dict:
     """Build the risk-report PDF for a contract and return it inline (base64).
     Rebuilds via the agent's build_report so no disk write is needed."""
-    name = _CONTRACTS.get(contract_key, _CONTRACTS["northstar"])
-    docs = _TmpDocs()
+    name = _CUSTOM_CONTRACTS.get(contract_key) or _CONTRACTS.get(contract_key, _CONTRACTS["northstar"])
+    docs = _get_active_docs()
     contracts = docs.contracts()
     contract = la.match_contract(contracts, name)
     if not contract:
@@ -351,6 +427,23 @@ def _report_pdf(contract_key: str) -> dict:
                         "cache-control": "no-store"},
             "isBase64Encoded": True,
             "body": base64.b64encode(pdf).decode("ascii")}
+
+
+def _contract_pdf(contract_key: str) -> dict:
+    """Return raw contract PDF bytes inline for viewing or download."""
+    name = _CUSTOM_CONTRACTS.get(contract_key) or _CONTRACTS.get(contract_key, _CONTRACTS["northstar"])
+    docs = _get_active_docs()
+    contracts = docs.contracts()
+    contract = la.match_contract(contracts, name)
+    if not contract:
+        return _json(404, {"error": f"no contract '{contract_key}'"})
+    data = docs.read(contract["id"])
+    return {"statusCode": 200,
+            "headers": {"content-type": "application/pdf",
+                        "content-disposition": f'inline; filename="{os.path.basename(contract["id"])}"',
+                        "cache-control": "no-store"},
+            "isBase64Encoded": True,
+            "body": base64.b64encode(data).decode("ascii")}
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +523,17 @@ PAGE_HTML = """<!doctype html>
       <a href="https://github.com/sethusrinivasan/box_hackathon/blob/fix/gross-usage-cost/docs/DESIGN_pgvector_evidence_retrieval.md">design doc</a>.
     </div>
   </div>
+  <div class="card" id="uploadCard">
+    <div style="font-weight:600;margin-bottom:6px">Upload Custom Sales Contract (PDF)</div>
+    <div class="muted" style="font-size:13px;margin-bottom:12px">
+      Drag &amp; drop or select any draft customer agreement to store in AWS S3 and run an immediate risk review against ground-truth evidence.
+    </div>
+    <div id="dropZone" style="border:2px dashed var(--line); border-radius:8px; padding:18px; text-align:center; cursor:pointer; background:rgba(255,255,255,0.02); transition:border-color .2s" onclick="document.getElementById('fileInput').click()">
+      <input type="file" id="fileInput" accept=".pdf" style="display:none" onchange="handleFileSelect(event)">
+      <div id="dropText">📄 Drop a draft contract PDF here or <span style="color:var(--accent);text-decoration:underline">browse files</span></div>
+    </div>
+    <div id="uploadStatus" class="muted" style="font-size:12px;margin-top:8px"></div>
+  </div>
   <div class="row">
     <button class="primary" onclick="run('northstar')">Review the Northstar archive contract</button>
     <button onclick="run('northstar-v2')">Review the v2 draft</button>
@@ -475,6 +579,65 @@ async function flipFlag(on){
 }
 loadFlag();
 
+const dropZone = document.getElementById('dropZone');
+if (dropZone) {
+  dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.style.borderColor = 'var(--accent)'; });
+  dropZone.addEventListener('dragleave', () => { dropZone.style.borderColor = 'var(--line)'; });
+  dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropZone.style.borderColor = 'var(--line)';
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      uploadContract(e.dataTransfer.files[0]);
+    }
+  });
+}
+
+function handleFileSelect(e) {
+  if (e.target.files && e.target.files[0]) {
+    uploadContract(e.target.files[0]);
+  }
+}
+
+async function uploadContract(file) {
+  if (!file.name.toLowerCase().endsWith('.pdf')) {
+    alert('Please select a PDF document.');
+    return;
+  }
+  const status = document.getElementById('uploadStatus');
+  status.innerHTML = `Uploading <strong>${esc(file.name)}</strong> (${(file.size/1024).toFixed(1)} KB)…`;
+  const reader = new FileReader();
+  reader.onload = async function() {
+    const b64 = reader.result.split(',')[1];
+    try {
+      const res = await fetch('/api/upload', {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify({filename: file.name, data: b64})
+      });
+      const d = await res.json();
+      if (d.ok) {
+        status.innerHTML = `✅ Stored in AWS S3: <strong>${esc(d.name)}</strong>. Running risk review…`;
+        let btn = document.getElementById('btn-' + d.contract_key);
+        if (!btn) {
+          btn = document.createElement('button');
+          btn.id = 'btn-' + d.contract_key;
+          btn.className = 'primary';
+          btn.textContent = `Review ${d.name}`;
+          btn.onclick = () => run(d.contract_key);
+          const row = document.querySelector('.row');
+          if (row) row.prepend(btn);
+        }
+        run(d.contract_key);
+      } else {
+        status.textContent = 'Upload failed: ' + (d.error || 'unknown');
+      }
+    } catch(err) {
+      status.textContent = 'Upload error: ' + err.message;
+    }
+  };
+  reader.readAsDataURL(file);
+}
+
 async function run(contract){
   out.innerHTML = '<div class="card muted">Reviewing…</div>';
   try{
@@ -501,8 +664,11 @@ function render(key, r){
     if(c.evidence_ref) h += ` <span class="muted">[source ${esc(c.evidence_ref)}]</span>`;
     h += `</div>`;
   });
-  h += `<p class="muted" style="margin-top:12px">A comment was posted on every claim, on the contract in Box (${esc(r.comments_posted)} comments).</p>`;
-  h += `<p><a href="/report.pdf?contract=${esc(key)}" target="_blank">Open the risk-report PDF →</a></p>`;
+  h += `<p class="muted" style="margin-top:12px">Comments and risk findings recorded (${esc(r.comments_posted)} comments).</p>`;
+  h += `<p style="margin-top:14px">` +
+       `<a href="/report.pdf?contract=${esc(key)}" target="_blank" style="font-weight:600">Open Risk Report PDF →</a>` +
+       `<a href="/contract.pdf?contract=${esc(key)}" target="_blank" style="margin-left:16px">View Contract PDF →</a>` +
+       `</p>`;
   return h + '</div>';
 }
 </script>

@@ -108,6 +108,36 @@ def test_unknown_contract_falls_back_safely():
     assert json.loads(r["body"])["result"]["contract"].startswith("Northstar")
 
 
+def test_upload_contract_and_review():
+    dummy_pdf = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF"
+    b64 = base64.b64encode(dummy_pdf).decode("ascii")
+    # 1. Upload contract
+    r_up = web.lambda_handler(_ev("POST", "/api/upload", {"filename": "Custom-SOW-2026.pdf", "data": b64}))
+    assert r_up["statusCode"] == 200
+    res_up = json.loads(r_up["body"])
+    assert res_up["ok"] is True
+    key = res_up["contract_key"]
+    assert "custom-sow-2026" in key
+
+    # 2. List contracts
+    r_list = web.lambda_handler(_ev("GET", "/api/contracts"))
+    assert r_list["statusCode"] == 200
+    contracts = json.loads(r_list["body"])["contracts"]
+    assert any(c["key"] == key for c in contracts)
+
+    # 3. Stream contract PDF
+    r_pdf = web.lambda_handler(_ev("GET", "/contract.pdf", qs={"contract": key}))
+    assert r_pdf["statusCode"] == 200
+    assert r_pdf["headers"]["content-type"] == "application/pdf"
+    assert base64.b64decode(r_pdf["body"]).startswith(b"%PDF-")
+
+    # 4. Review custom contract
+    r_run = web.lambda_handler(_ev("POST", "/api/run", {"contract": key}))
+    assert r_run["statusCode"] == 200
+    res_run = json.loads(r_run["body"])["result"]
+    assert len(res_run["claims"]) > 0
+
+
 def test_report_pdf_streams_bytes():
     r = web.lambda_handler(_ev("GET", "/report.pdf", qs={"contract": "northstar"}))
     assert r["statusCode"] == 200

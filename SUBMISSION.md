@@ -87,7 +87,7 @@ Stuffing an entire enterprise document library into an LLM context window is exp
 
 ### C. Frugal, Serverless-First Infrastructure (Near-$0 Idle Cost)
 The entire solution is defined in **AWS CDK v2** across 4 modular stacks:
-1. **`RealityCheckWebDemo`**: Public offline demo on an AWS Lambda Function URL running on Graviton (arm64), 256 MB memory, reserved concurrency 5, and an **idle auto-shutdown** mechanism that parks the function after 3 days of zero traffic.
+1. **`RealityCheckWebDemo`**: Public AWS-native web portal on an AWS Lambda Function URL backed by Amazon S3 (`contracts/`, `evidence/`, `reports/`) and live Bedrock reasoning. Features drag-and-drop contract PDF uploading, instant review execution, Graviton (arm64) runtime, reserved concurrency 5, and an **idle auto-shutdown** mechanism that parks the function after 3 days of zero traffic.
 2. **`RealityCheckObservability`**: Dedicated CloudWatch dashboard tracking request rates, p99 latencies, Bedrock costs, and synthetic canary health.
 3. **`RealityCheckCanary`**: Periodic automated synthetic health checks running against all endpoints.
 4. **`RealityCheckCostTracker`**: Daily holistic AWS cost collection via EventBridge Scheduler writing directly to **Aurora Serverless v2 PostgreSQL (express configuration, min 0 ACU)** using **IAM database authentication** (no stored passwords, no Secrets Manager fees).
@@ -127,7 +127,7 @@ The entire solution is defined in **AWS CDK v2** across 4 modular stacks:
 ## 8. Accomplishments & Verification
 
 * **Full Fork & Upstream Alignment:** PR #4 and PR #6 merged into `main`; upstream PR #15 (`bearbearpanpan/box_hackathon#15`) polished with CloudWatch tags, security suppression annotations, and comprehensive documentation.
-* **100% Test Suite Pass:** 38 unit and integration tests passing across agent logic, PDF generation, cost calculations, canary checks, and telemetry.
+* **100% Test Suite Pass:** 44 unit and integration tests passing across agent logic, S3 storage, custom uploads, PDF generation, cost calculations, canary checks, and telemetry.
 * **Live, High-Availability Deployments:**
   * Public AWS Lambda Web Demo verified live and responsive.
   * Standalone 16:9 interactive Pitch Deck deployed to GitHub Pages with built-in Presenter Mode (`P`), slide timers, and live demo launching.

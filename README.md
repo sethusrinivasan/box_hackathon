@@ -201,8 +201,10 @@ docs/presentation.html    interactive presentation web deck (standalone copy)
 
 Three CDK stacks (`agent/infra/cdk`), all tuned for near-zero idle cost:
 
-- **RealityCheckWebDemo** — public offline demo on a Lambda Function URL. Graviton
-  (arm64), 256 MB, 3-day logs, reserved concurrency 5, and an **idle auto-shutdown**
+- **RealityCheckWebDemo** — public AWS-native web portal on a Lambda Function URL
+  with Amazon S3 storage (`contracts/`, `evidence/`, `reports/`) and live Bedrock
+  reasoning. Graviton (arm64), 256 MB, drag-and-drop contract upload, 3-day logs,
+  reserved concurrency 5, and an **idle auto-shutdown**
   (parks the function to $0 after 3 days with no invocations; manual re-enable).
 - **RealityCheckObservability** — CloudWatch dashboard + baseline alarms.
 - **RealityCheckCostTracker** — daily holistic cost collection into **Aurora
