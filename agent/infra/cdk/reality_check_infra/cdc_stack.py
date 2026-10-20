@@ -46,7 +46,7 @@ class CdcStack(Stack):
         cluster_endpoint: str = "",
         cluster_resource_id: str = "",
         db_name: str = "postgres",
-        db_iam_user: str = "cost_collector",
+        db_iam_user: str = "cdc_sync_worker",
         db_port: int = 5432,
         sync_schedule_minutes: int = 5,
         **kwargs,
@@ -57,7 +57,6 @@ class CdcStack(Stack):
         lock_table = dynamodb.Table(
             self,
             "DuckDbSyncLockTable",
-            table_name="duckdb-sync-locks",
             partition_key=dynamodb.Attribute(
                 name="lock_key", type=dynamodb.AttributeType.STRING
             ),
@@ -70,9 +69,9 @@ class CdcStack(Stack):
         analytics_bucket = s3.Bucket(
             self,
             "DuckDbAnalyticsBucket",
-            bucket_name=f"realitycheck-analytics-{self.account}-{self.region}",
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             encryption=s3.BucketEncryption.S3_MANAGED,
+            enforce_ssl=True,
             removal_policy=RemovalPolicy.DESTROY,
             auto_delete_objects=True,
             lifecycle_rules=[
@@ -97,6 +96,7 @@ class CdcStack(Stack):
             "LEASE_DURATION_SEC": "300",
             "S3_BUCKET": analytics_bucket.bucket_name,
             "S3_KEY": "analytics/analytics.duckdb",
+            "S3_STORAGE_CLASS": "STANDARD",
             "LOCAL_DB_PATH": "/tmp/analytics.duckdb",
             "DB_HOST": cluster_endpoint,
             "DB_PORT": str(db_port),
@@ -118,8 +118,7 @@ class CdcStack(Stack):
             architecture=lambda_.Architecture.ARM_64,
             handler="agent.cdc.sync_worker.lambda_handler",
             code=lambda_.Code.from_asset(
-                _REPO_ROOT,
-                exclude=["**", "!agent/cdc/**"],
+                os.path.join(_REPO_ROOT, "agent", "cdc"),
                 bundling=self._bundling(),
             ),
             timeout=Duration.minutes(5),
@@ -191,6 +190,7 @@ class CdcStack(Stack):
         reader_env = {
             "S3_BUCKET": analytics_bucket.bucket_name,
             "S3_KEY": "analytics/analytics.duckdb",
+            "S3_STORAGE_CLASS": "STANDARD",
             "LOCAL_DB_PATH": "/tmp/analytics.duckdb",
             "LOCAL_ETAG_PATH": "/tmp/analytics.etag",
             "EMIT_METRICS": "true",
@@ -205,8 +205,7 @@ class CdcStack(Stack):
             architecture=lambda_.Architecture.ARM_64,
             handler="agent.cdc.reader.lambda_handler",
             code=lambda_.Code.from_asset(
-                _REPO_ROOT,
-                exclude=["**", "!agent/cdc/**"],
+                os.path.join(_REPO_ROOT, "agent", "cdc"),
                 bundling=self._bundling(),
             ),
             timeout=Duration.seconds(30),
@@ -277,7 +276,9 @@ class CdcStack(Stack):
     def _bundling() -> BundlingOptions:
         """Package agent/cdc + duckdb/psycopg dependencies for arm64."""
         docker_cmd = " && ".join([
-            "cp -r /asset-input/. /asset-output/",
+            "mkdir -p /asset-output/agent/cdc",
+            "touch /asset-output/agent/__init__.py",
+            "cp -r /asset-input/. /asset-output/agent/cdc/",
             "pip install -r /asset-output/agent/cdc/requirements.txt -t /asset-output "
             "--platform manylinux2014_aarch64 --implementation cp "
             "--python-version 3.12 --only-binary=:all: --upgrade",
@@ -301,7 +302,9 @@ class _LocalCdcBundler:
         try:
             # 1) Copy cdc package
             dest_cdc = os.path.join(output_dir, "agent", "cdc")
-            os.makedirs(os.path.dirname(dest_cdc), exist_ok=True)
+            os.makedirs(dest_cdc, exist_ok=True)
+            with open(os.path.join(output_dir, "agent", "__init__.py"), "w") as f:
+                f.write("")
             shutil.copytree(src, dest_cdc, dirs_exist_ok=True)
 
             # 2) Install wheels

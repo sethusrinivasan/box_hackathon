@@ -45,12 +45,13 @@ LOCK_KEY = os.environ.get("LOCK_KEY", "duckdb_writer_lease")
 LEASE_DURATION_SEC = int(os.environ.get("LEASE_DURATION_SEC", "300"))
 S3_BUCKET = os.environ.get("S3_BUCKET", "")
 S3_KEY = os.environ.get("S3_KEY", "analytics/analytics.duckdb")
+S3_STORAGE_CLASS = os.environ.get("S3_STORAGE_CLASS", "STANDARD")
 LOCAL_DB_PATH = os.environ.get("LOCAL_DB_PATH", "/tmp/analytics.duckdb")
 
 DB_HOST = os.environ.get("DB_HOST", "")
 DB_PORT = int(os.environ.get("DB_PORT", "5432"))
 DB_NAME = os.environ.get("DB_NAME", "postgres")
-DB_IAM_USER = os.environ.get("DB_IAM_USER", "cost_collector")
+DB_IAM_USER = os.environ.get("DB_IAM_USER", "cdc_sync_worker")
 DB_PASSWORD = os.environ.get("DB_PASSWORD", "")  # Fallback for local/test env
 REGION = os.environ.get("AWS_REGION_NAME") or os.environ.get("AWS_REGION", "us-east-1")
 
@@ -89,6 +90,7 @@ class CdcSyncWorker:
         lock_key: str = LOCK_KEY,
         s3_bucket: str = S3_BUCKET,
         s3_key: str = S3_KEY,
+        s3_storage_class: str = S3_STORAGE_CLASS,
         local_db_path: str = LOCAL_DB_PATH,
         replicated_tables: list[str] | None = None,
         lease_manager: DynamoDbLeaseManager | None = None,
@@ -100,6 +102,7 @@ class CdcSyncWorker:
         self.lock_key = lock_key
         self.s3_bucket = s3_bucket
         self.s3_key = s3_key
+        self.s3_storage_class = s3_storage_class
         self.local_db_path = local_db_path
         self.replicated_tables = replicated_tables or REPLICATED_TABLES
         self.lease = lease_manager or DynamoDbLeaseManager(
@@ -157,11 +160,26 @@ class CdcSyncWorker:
             pg_conn = self._connect_aurora()
             try:
                 with pg_conn.cursor() as cur:
-                    # Current WAL LSN on source Aurora
-                    cur.execute("SELECT pg_current_wal_lsn();")
-                    row = cur.fetchone()
-                    current_aurora_lsn_str = row[0] if row else "0/0"
-                    current_aurora_lsn = lsn_to_int(current_aurora_lsn_str)
+                    # Check Aurora WAL level (requires 'logical' for incremental WAL decoding)
+                    cur.execute("SHOW wal_level;")
+                    wal_row = cur.fetchone()
+                    wal_level = wal_row[0] if wal_row else "unknown"
+
+                    current_aurora_lsn_str = "0/0"
+                    current_aurora_lsn = 0
+
+                    if wal_level == "logical":
+                        cur.execute("SELECT pg_current_wal_lsn();")
+                        row = cur.fetchone()
+                        current_aurora_lsn_str = row[0] if row else "0/0"
+                        current_aurora_lsn = lsn_to_int(current_aurora_lsn_str)
+                    else:
+                        logger.warning(
+                            "Aurora wal_level is '%s' (not 'logical'). Incremental WAL decoding requires "
+                            "rds.logical_replication=1 in DB cluster parameter group. Performing snapshot sync.",
+                            wal_level,
+                        )
+                        needs_full_sync = True
 
                     if not needs_full_sync:
                         # Check drift against Aurora
@@ -195,11 +213,13 @@ class CdcSyncWorker:
                         bucket=self.s3_bucket,
                         key=self.s3_key,
                         local_path=self.local_db_path,
+                        storage_class=self.s3_storage_class,
                     )
                     logger.info("Successfully pushed updated DuckDB to S3 with ETag: %s", etag)
 
                 # 4. Advance PostgreSQL replication slot LSN only after S3 upload succeeds
-                self._acknowledge_replication_slot(pg_conn, current_aurora_lsn_str)
+                if wal_level == "logical":
+                    self._acknowledge_replication_slot(pg_conn, current_aurora_lsn_str)
 
                 # Calculate replication lag
                 watermark = DuckDbApplier(self.local_db_path).get_watermark()

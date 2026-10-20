@@ -254,6 +254,38 @@ class TestDuckDbApplierAndValidator(unittest.TestCase):
         self.assertFalse(drift_mismatch.is_valid)
         self.assertIn("Row count mismatch", drift_mismatch.discrepancy_reason)
 
+    def test_s3_storage_upload_explicit_storage_class(self):
+        mock_s3 = MagicMock()
+        mock_s3.put_object.return_value = {"ETag": '"etag-abc"'}
+        storage = DuckDbS3Storage(s3_client=mock_s3)
+
+        dummy_path = os.path.join(self.tmpdir, "dummy.duckdb")
+        with open(dummy_path, "wb") as f:
+            f.write(b"DUCKDB_TEST_DATA")
+
+        # Default storage class should be STANDARD (cheapest tier for frequent small writes)
+        etag = storage.upload_file("test-bucket", "test-key", dummy_path)
+        self.assertEqual(etag, "etag-abc")
+        mock_s3.put_object.assert_called_with(
+            Bucket="test-bucket",
+            Key="test-key",
+            Body=unittest.mock.ANY,
+            ContentType="application/octet-stream",
+            StorageClass="STANDARD",
+            Metadata=unittest.mock.ANY,
+        )
+
+        # Explicit custom storage class
+        storage.upload_file("test-bucket", "test-key", dummy_path, storage_class="INTELLIGENT_TIERING")
+        mock_s3.put_object.assert_called_with(
+            Bucket="test-bucket",
+            Key="test-key",
+            Body=unittest.mock.ANY,
+            ContentType="application/octet-stream",
+            StorageClass="INTELLIGENT_TIERING",
+            Metadata=unittest.mock.ANY,
+        )
+
 
 class TestCdcSyncWorker(unittest.TestCase):
     def setUp(self):
@@ -288,10 +320,11 @@ class TestCdcSyncWorker(unittest.TestCase):
         mock_cur = MagicMock()
         mock_conn.cursor.return_value.__enter__.return_value = mock_cur
 
-        # Mock WAL LSN and schema introspection
+        # Mock WAL level, WAL LSN, and schema introspection
         mock_cur.fetchone.side_effect = [
-            ("0/2000",),  # pg_current_wal_lsn
-            ("0/2000",),  # watermark re-read
+            ("logical",),  # SHOW wal_level;
+            ("0/2000",),   # pg_current_wal_lsn
+            ("0/2000",),   # watermark re-read
         ]
         mock_cur.fetchall.side_effect = [
             [("usage_date", "date"), ("gross_usd", "numeric")],  # columns
@@ -318,6 +351,57 @@ class TestCdcSyncWorker(unittest.TestCase):
             mock_lease.release.assert_called_once()
             # Ensure EMF metrics written to stdout
             self.assertIn("RealityCheckCDC", mock_stdout.getvalue())
+
+    def test_worker_non_logical_wal_falls_back_to_snapshot(self):
+        mock_lease = MagicMock()
+        mock_lease.acquire.return_value = True
+
+        mock_storage = MagicMock()
+        mock_storage.download_if_exists.return_value = True  # File exists in S3
+        mock_storage.upload_file.return_value = "etag-snapshot-fallback"
+
+        # Pre-populate valid local file so file check passes
+        applier = DuckDbApplier(self.db_path)
+        applier.full_reinit_table(
+            table_name="daily_cost",
+            columns=["usage_date", "gross_usd"],
+            column_types=["DATE", "DOUBLE"],
+            rows=[("2026-10-18", 10.0)],
+            primary_keys=["usage_date"],
+            snapshot_lsn=1000,
+        )
+        applier.close()
+
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+
+        # wal_level is 'replica' (default parameter group, logical replication not enabled)
+        mock_cur.fetchone.side_effect = [
+            ("replica",),  # SHOW wal_level;
+        ]
+        mock_cur.fetchall.side_effect = [
+            [("usage_date", "date"), ("gross_usd", "numeric")],  # columns
+            [("usage_date",)],  # primary keys
+            [("2026-10-18", 10.0)],  # snapshot rows
+        ]
+
+        worker = CdcSyncWorker(
+            lock_table="test-table",
+            s3_bucket="test-bucket",
+            s3_key="analytics/analytics.duckdb",
+            lease_manager=mock_lease,
+            storage=mock_storage,
+            local_db_path=self.db_path,
+            replicated_tables=["daily_cost"],
+            pg_connection=mock_conn,
+        )
+
+        result = worker.execute_sync()
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(result["reinit_count"], 1)  # Graceful fallback to snapshot sync
+        mock_storage.upload_file.assert_called_once()
+        mock_lease.release.assert_called_once()
 
 
 class TestDuckDbReader(unittest.TestCase):

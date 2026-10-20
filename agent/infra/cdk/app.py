@@ -114,6 +114,9 @@ if CdcStack is not None:
     CdcStack(
         app,
         "RealityCheckCdc",
+        cluster_endpoint="reality-check-cost-tracker.cluster-c52ymc6u0ruy.us-east-2.rds.amazonaws.com",
+        cluster_resource_id="cluster-DJLU4ZBVHZ6HGQCZTXR7YKDQ7Q",
+        db_iam_user="cdc_sync_worker",
         env=env,
         description="Reality Check serverless Aurora-to-DuckDB CDC pipeline via S3.",
     )

@@ -241,8 +241,18 @@ class DuckDbS3Storage:
             logger.error("Failed to download s3://%s/%s: %s", bucket, key, e)
             raise
 
-    def upload_file(self, bucket: str, key: str, local_path: str) -> str:
+    def upload_file(
+        self,
+        bucket: str,
+        key: str,
+        local_path: str,
+        storage_class: str = "STANDARD",
+    ) -> str:
         """Upload DuckDB file to S3 atomically.
+
+        Explicitly sets StorageClass (default: STANDARD - cheapest tier for < 50 MB
+        with frequent 5-minute overwrites; avoids Glacier/IA minimum storage durations
+        and per-GB retrieval fees).
 
         Returns the uploaded object ETag.
         """
@@ -259,11 +269,20 @@ class DuckDbS3Storage:
                 Key=key,
                 Body=f,
                 ContentType="application/octet-stream",
+                StorageClass=storage_class,
                 Metadata={
                     "cdc-sync-timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     "cdc-file-size": str(file_size),
                 },
             )
         etag = resp.get("ETag", "").strip('"')
-        logger.info("Uploaded %s to s3://%s/%s (size: %d bytes, etag: %s)", local_path, bucket, key, file_size, etag)
+        logger.info(
+            "Uploaded %s to s3://%s/%s (tier: %s, size: %d bytes, etag: %s)",
+            local_path,
+            bucket,
+            key,
+            storage_class,
+            file_size,
+            etag,
+        )
         return etag

@@ -157,3 +157,25 @@ GRANT rds_iam TO evidence_reader;
 GRANT CONNECT ON DATABASE postgres TO evidence_reader;
 GRANT USAGE ON SCHEMA public TO evidence_reader;
 GRANT SELECT ON evidence_chunk TO evidence_reader;
+
+-- -----------------------------------------------------------------------------
+-- CDC REPLICATION role for the scheduled singleton Sync Worker Lambda.
+-- IAM-auth only. Reads WAL replication stream via rds_replication and performs
+-- initial table snapshot reads (SELECT-only). It can never insert, update, or
+-- delete rows in PostgreSQL.
+-- -----------------------------------------------------------------------------
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cdc_sync_worker') THEN
+        CREATE ROLE cdc_sync_worker WITH LOGIN;
+    END IF;
+END
+$$;
+
+GRANT rds_iam TO cdc_sync_worker;
+GRANT rds_replication TO cdc_sync_worker;
+GRANT CONNECT ON DATABASE postgres TO cdc_sync_worker;
+GRANT USAGE ON SCHEMA public TO cdc_sync_worker;
+GRANT SELECT ON daily_cost TO cdc_sync_worker;
+GRANT SELECT ON resource_inventory TO cdc_sync_worker;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO cdc_sync_worker;

@@ -232,9 +232,10 @@ def lambda_handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]
             return _json_response(500, {"error": str(e), "sql": query_sql})
 
     # 4. Web Query Editor Interface (GET /)
-    if method == "GET" and path in ("/", "/index.html"):
+    if method in ("GET", "HEAD") and path in ("/", "/index.html"):
         watermark = reader.get_watermark()
-        return _html_response(200, _render_query_editor_html(watermark))
+        body = "" if method == "HEAD" else _render_query_editor_html(watermark)
+        return _html_response(200, body)
 
     return _json_response(404, {"error": f"Not found: {method} {path}"})
 
