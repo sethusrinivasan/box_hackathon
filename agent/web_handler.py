@@ -1,27 +1,22 @@
 """
-web_handler.py — public, no-auth web demo for Reality Check (contract claim review).
+web_handler.py — public web portal for Reality Check contract claim reviews.
 
-Served by an AWS Lambda Function URL (see agent/infra/cdk/.../web_demo_stack.py).
-Renders one self-contained HTML page and a tiny JSON API that runs the OFFLINE
-contract-review pipeline (agent/local_agent.py) against the bundled synthetic
-fixtures in docs/box_upload/ — reviewing a draft sales contract's claims against
-Box "evidence" documents and returning a claim-by-claim verdict.
-
-Why this is safe to expose publicly with no auth:
-  * OFFLINE ONLY. We use LocalDocs (reads docs/box_upload/*) and a CANNED
-    Bedrock client — no live Box, no real Bedrock call, no credentials in the
-    function env. There is nothing sensitive to leak and no per-request cost
-    beyond Lambda compute.
-  * All data is synthetic (fictional customer "Northstar", fictional evidence).
-  * Report PDFs/comments are written to /tmp only (Lambda's writable scratch)
-    via REALITY_CHECK_REPORTS_DIR; never anywhere durable.
-  * The CDK stack caps blast radius with reserved concurrency.
+Served by an AWS Lambda Function URL. Renders a self-contained HTML page and a JSON
+API supporting contract reviews, custom PDF uploads, in-browser PDF viewing,
+and PDF risk report downloads. Operates in AWS-native mode backed by Amazon S3
+and Amazon Bedrock (frugal Amazon Nova Lite), falling back to offline mode when
+cloud resources are unconfigured.
 
 Routes (Lambda Function URL, payload format 2.0):
-  GET  /                -> the demo page (HTML)
-  POST /api/run         -> review a contract; JSON in, JSON out
-  GET  /report.pdf?...  -> the generated risk-report PDF
-  GET  /healthz         -> liveness probe (JSON)
+  GET  /                -> Interactive web portal (HTML)
+  POST /api/run         -> Run claim review; returns JSON verdict and claim list
+  POST /api/upload      -> Upload contract PDF (stored in S3 or local scratch)
+  GET  /api/contracts   -> List all available contracts
+  GET  /contract.pdf    -> Stream raw contract PDF
+  GET  /report.pdf      -> Stream generated risk-report PDF
+  GET  /healthz         -> Liveness probe
+  GET  /api/flag        -> Feature flag read
+  POST /api/flag        -> Feature flag update
 """
 from __future__ import annotations
 
@@ -33,10 +28,7 @@ import sys
 import time
 
 # ---------------------------------------------------------------------------
-# Force OFFLINE mode before importing the agent. local_agent.get_docs() returns
-# BoxDocs only when all six Box env vars are set; blanking them (present-but-
-# empty, so the .env auto-loader can't re-populate) guarantees LocalDocs. We
-# also route report writes to /tmp (the Lambda fs is read-only except /tmp).
+# Disable Box credentials in web context; use S3Docs or LocalDocs.
 # ---------------------------------------------------------------------------
 for _k in ("BOX_CLIENT_ID", "BOX_CLIENT_SECRET", "BOX_ENTERPRISE_ID",
            "BOX_CONTRACTS_FOLDER_ID", "BOX_EVIDENCE_FOLDER_ID", "BOX_REPORTS_FOLDER_ID"):
@@ -49,15 +41,14 @@ ROOT = os.path.abspath(os.path.join(HERE, ".."))
 for _p in (HERE, os.path.join(ROOT, "box")):
     sys.path.insert(0, _p)
 
-import local_agent as la          # noqa: E402 — the post-restructure runtime
-import feature_flags as ff        # noqa: E402 — SSM-backed demo feature flag
-from cost_estimate import estimate_cost  # noqa: E402 — live-path cost heads-up
-from telemetry import (           # noqa: E402 — re-wire the shared observability
-    get_logger, log_event, emit_metric, set_request_id,
+import local_agent as la
+import feature_flags as ff
+from cost_estimate import estimate_cost
+from telemetry import (
+    get_logger, log_event, emit_metric, set_request_id, capture_aws_calls,
 )
 
-# Model the live path WOULD use (frugal default). Shown in cost estimates only;
-# the hosted demo never actually calls it.
+# Frugal default model on Amazon Bedrock ($0.06/$0.24 per 1M tokens)
 _LIVE_MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.amazon.nova-lite-v1:0")
 
 _log = get_logger("reality_check.web")
@@ -150,19 +141,29 @@ _CONTRACTS = {
     "northstar-v2": "Northstar-Archive-Migration-Agreement-v2",
 }
 _CUSTOM_CONTRACTS: dict[str, str] = {}
+_LAST_REVIEWS: dict[str, list] = {}
+
+
+def _resolve_contract_name(contract_key: str, docs=None, fallback: bool = False) -> str | None:
+    """Resolve a contract query key to its actual file or display name."""
+    if contract_key in _CUSTOM_CONTRACTS:
+        return _CUSTOM_CONTRACTS[contract_key]
+    if contract_key in _CONTRACTS:
+        return _CONTRACTS[contract_key]
+    d = docs or _get_active_docs()
+    for c in d.contracts():
+        stem = c["name"].rsplit(".", 1)[0]
+        if stem.lower() == contract_key.lower() or c["name"].lower() == contract_key.lower():
+            return c["name"]
+    return _CONTRACTS["northstar"] if fallback else None
 
 
 def _estimate_live_cost(contract_key: str, out: dict) -> dict:
-    """Estimate what a REAL Bedrock run of this review would have cost. We
-    reconstruct the exact input the live path sends the model — the contract
-    text plus every evidence PDF's text plus the system prompt — so the estimate
-    reflects reality. Hosted demo never calls Bedrock; this is a transparency
-    heads-up on the live economics."""
+    """Estimate what a real Bedrock run of this review would cost."""
     claims = out.get("claims", []) or []
     docs = _get_active_docs()
-    # Same text assembly the live llm_review() feeds the model.
     parts = [getattr(la, "REVIEW_SYSTEM", "")]
-    name = _CUSTOM_CONTRACTS.get(contract_key) or _CONTRACTS.get(contract_key, _CONTRACTS["northstar"])
+    name = _resolve_contract_name(contract_key, docs=docs, fallback=True)
     contract = la.match_contract(docs.contracts(), name)
     if contract:
         parts.append(la.pdf_text(docs.read(contract["id"])))
@@ -175,44 +176,47 @@ def _estimate_live_cost(contract_key: str, out: dict) -> dict:
 
 
 def _run_review(contract_key: str, *, live: bool = False) -> dict:
-    name = _CUSTOM_CONTRACTS.get(contract_key) or _CONTRACTS.get(contract_key, _CONTRACTS["northstar"])
-    docs = _get_active_docs()
-    retrieval_on = ff.is_enabled()
-    os.environ["EVIDENCE_STORE"] = "on" if retrieval_on else "off"
+    with capture_aws_calls() as tracker:
+        docs = _get_active_docs()
+        name = _resolve_contract_name(contract_key, docs=docs, fallback=True)
+        retrieval_on = ff.is_enabled()
+        os.environ["EVIDENCE_STORE"] = "on" if retrieval_on else "off"
 
-    client = None
-    use_live_bedrock = live or os.environ.get("BEDROCK_ENABLED") == "true"
-    if use_live_bedrock:
-        try:
-            client = la.bedrock()
-        except Exception as exc:
-            _log.warning(f"Bedrock invocation failed ({exc}); falling back to deterministic review")
+        client = None
+        use_live_bedrock = live or os.environ.get("BEDROCK_ENABLED") == "true"
+        if use_live_bedrock:
+            try:
+                client = la.bedrock()
+            except Exception as exc:
+                _log.warning(f"Bedrock invocation failed ({exc}); falling back to deterministic review")
+                client = _CannedBedrock()
+        else:
             client = _CannedBedrock()
-    else:
-        client = _CannedBedrock()
 
-    out = la.review_contract(docs, name, client)
-    s = out.get("summary", {})
-    emit_metric("WebDemoReview", 1, "Count", contract=contract_key)
-    emit_metric("WebDemoRisksFound", s.get("Risk identified", 0), "Count")
-    emit_metric("WebDemoEvidenceMode", 1, "Count",
-                mode="pgvector" if retrieval_on else "full-corpus")
-    is_live = client != _CannedBedrock and not isinstance(client, _CannedBedrock)
-    result = {
-        "contract": out.get("contract"),
-        "contract_key": contract_key,
-        "summary": s,
-        "claims": out.get("claims", []),
-        "sources": out.get("sources", []),
-        "report_name": out.get("report_name"),
-        "comments_posted": out.get("comments_posted_on_contract"),
-        "mode": "live (bedrock)" if is_live else "mock",
-        "evidence_retrieval": "pgvector (semantic top-k)" if retrieval_on
-                               else "full-corpus",
-    }
-    if live or not is_live:
-        result["live_cost_estimate"] = _estimate_live_cost(contract_key, out)
-    return result
+        out = la.review_contract(docs, name, client)
+        _LAST_REVIEWS[contract_key] = out.get("claims", [])
+        s = out.get("summary", {})
+        emit_metric("WebDemoReview", 1, "Count", contract=contract_key)
+        emit_metric("WebDemoRisksFound", s.get("Risk identified", 0), "Count")
+        emit_metric("WebDemoEvidenceMode", 1, "Count",
+                    mode="pgvector" if retrieval_on else "full-corpus")
+        is_live = client != _CannedBedrock and not isinstance(client, _CannedBedrock)
+        result = {
+            "contract": out.get("contract"),
+            "contract_key": contract_key,
+            "summary": s,
+            "claims": out.get("claims", []),
+            "sources": out.get("sources", []),
+            "report_name": out.get("report_name"),
+            "comments_posted": out.get("comments_posted_on_contract"),
+            "mode": "live (bedrock)" if is_live else "mock",
+            "evidence_retrieval": "pgvector (semantic top-k)" if retrieval_on
+                                   else "full-corpus",
+            "aws_breakdown": tracker.summary(),
+        }
+        if live or not is_live:
+            result["live_cost_estimate"] = _estimate_live_cost(contract_key, out)
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -354,16 +358,30 @@ def lambda_handler(event, context=None):
             })
         if path == "/api/contracts" and method == "GET":
             status = 200
-            items = [{"key": k, "name": v} for k, v in _CONTRACTS.items()]
-            items.extend([{"key": k, "name": v} for k, v in _CUSTOM_CONTRACTS.items()])
+            docs = _get_active_docs()
+            seen = set()
+            items = []
+            for k, v in _CONTRACTS.items():
+                seen.add(k)
+                items.append({"key": k, "name": v})
+            for k, v in _CUSTOM_CONTRACTS.items():
+                if k not in seen:
+                    seen.add(k)
+                    items.append({"key": k, "name": v})
+            for c in docs.contracts():
+                stem = c["name"].rsplit(".", 1)[0]
+                ckey = stem.lower()
+                if ckey not in seen:
+                    seen.add(ckey)
+                    items.append({"key": ckey, "name": stem})
             return _json(200, {"contracts": items})
         if path == "/contract.pdf" and method in ("GET", "HEAD"):
             qs = event.get("queryStringParameters") or {}
             contract = (qs.get("contract") or "northstar").strip()
+            name = _resolve_contract_name(contract)
+            if not name:
+                return _json(404, {"error": f"no contract '{contract}'"})
             if method == "HEAD":
-                name = _CUSTOM_CONTRACTS.get(contract) or _CONTRACTS.get(contract)
-                if not name:
-                    return _json(404, {"error": f"no contract '{contract}'"})
                 return {"statusCode": 200,
                         "headers": {"content-type": "application/pdf",
                                     "content-disposition": f'inline; filename="{contract}.pdf"',
@@ -375,10 +393,10 @@ def lambda_handler(event, context=None):
         if path == "/report.pdf" and method in ("GET", "HEAD"):
             qs = event.get("queryStringParameters") or {}
             contract = (qs.get("contract") or "northstar").strip()
+            name = _resolve_contract_name(contract)
+            if not name:
+                return _json(404, {"error": f"no contract '{contract}'"})
             if method == "HEAD":
-                name = _CUSTOM_CONTRACTS.get(contract) or _CONTRACTS.get(contract)
-                if not name:
-                    return _json(404, {"error": f"no contract '{contract}'"})
                 return {"statusCode": 200,
                         "headers": {"content-type": "application/pdf",
                                     "content-disposition": f'inline; filename="RealityCheck-{contract}.pdf"',
@@ -403,12 +421,12 @@ def lambda_handler(event, context=None):
 
 
 def _report_pdf(contract_key: str) -> dict:
-    """Build the risk-report PDF for a contract and return it inline (base64).
-    Rebuilds via the agent's build_report so no disk write is needed."""
-    name = _CUSTOM_CONTRACTS.get(contract_key) or _CONTRACTS.get(contract_key, _CONTRACTS["northstar"])
+    """Build the risk-report PDF for a contract and return it inline (base64)."""
     docs = _get_active_docs()
-    contracts = docs.contracts()
-    contract = la.match_contract(contracts, name)
+    name = _resolve_contract_name(contract_key, docs=docs)
+    if not name:
+        return _json(404, {"error": f"no contract '{contract_key}'"})
+    contract = la.match_contract(docs.contracts(), name)
     if not contract:
         return _json(404, {"error": f"no contract '{contract_key}'"})
     sources = []
@@ -417,7 +435,16 @@ def _report_pdf(contract_key: str) -> dict:
         title = text.strip().splitlines()[0] if text.strip() else e["name"]
         sources.append({**e, "ref": f"B{i}", "text": text, "title": title,
                         "last_updated": la.last_updated(text)})
-    claims = la.by_severity(la.classify(_CANNED_CLAIMS))
+
+    raw_claims = _LAST_REVIEWS.get(contract_key)
+    if raw_claims is None:
+        if contract_key not in _CONTRACTS:
+            rev = _run_review(contract_key)
+            raw_claims = rev.get("claims", [])
+        else:
+            raw_claims = _CANNED_CLAIMS
+
+    claims = la.by_severity(la.classify(raw_claims))
     counts = la.summarize(claims)
     pdf = la.build_report(contract, claims, counts, sources)
     emit_metric("WebDemoPdf", 1, "Count", contract=contract_key)
@@ -431,10 +458,11 @@ def _report_pdf(contract_key: str) -> dict:
 
 def _contract_pdf(contract_key: str) -> dict:
     """Return raw contract PDF bytes inline for viewing or download."""
-    name = _CUSTOM_CONTRACTS.get(contract_key) or _CONTRACTS.get(contract_key, _CONTRACTS["northstar"])
     docs = _get_active_docs()
-    contracts = docs.contracts()
-    contract = la.match_contract(contracts, name)
+    name = _resolve_contract_name(contract_key, docs=docs)
+    if not name:
+        return _json(404, {"error": f"no contract '{contract_key}'"})
+    contract = la.match_contract(docs.contracts(), name)
     if not contract:
         return _json(404, {"error": f"no contract '{contract_key}'"})
     data = docs.read(contract["id"])
@@ -579,6 +607,25 @@ async function flipFlag(on){
 }
 loadFlag();
 
+async function loadContracts() {
+  try {
+    const r = await fetch('/api/contracts');
+    const d = await r.json();
+    const row = document.querySelector('.row');
+    if (!row || !d.contracts || !d.contracts.length) return;
+    row.innerHTML = '';
+    d.contracts.forEach((c, idx) => {
+      const btn = document.createElement('button');
+      btn.id = 'btn-' + c.key;
+      btn.className = idx === 0 ? 'primary' : '';
+      btn.textContent = `Review ${c.name}`;
+      btn.onclick = () => run(c.key);
+      row.appendChild(btn);
+    });
+  } catch(e) {}
+}
+loadContracts();
+
 const dropZone = document.getElementById('dropZone');
 if (dropZone) {
   dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.style.borderColor = 'var(--accent)'; });
@@ -669,6 +716,39 @@ function render(key, r){
        `<a href="/report.pdf?contract=${esc(key)}" target="_blank" style="font-weight:600">Open Risk Report PDF →</a>` +
        `<a href="/contract.pdf?contract=${esc(key)}" target="_blank" style="margin-left:16px">View Contract PDF →</a>` +
        `</p>`;
+  const b = r.aws_breakdown;
+  if (b && b.total_calls > 0) {
+    h += `<div style="margin-top:16px; padding:12px 14px; background:#0d1117; border:1px solid var(--line); border-radius:8px">`;
+    h += `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px">`;
+    h += `<strong style="font-size:13px">⚡ AWS Service Latency &amp; Call Breakdown</strong>`;
+    h += `<span class="muted" style="font-size:12px">${esc(b.total_calls)} calls · ${esc(b.total_aws_ms)} ms total</span>`;
+    h += `</div>`;
+    h += `<table style="width:100%; font-size:12px; border-collapse:collapse; margin-top:6px">`;
+    h += `<thead><tr style="text-align:left; color:var(--muted); border-bottom:1px solid var(--line)">`;
+    h += `<th style="padding:4px 6px">Service</th>`;
+    h += `<th style="padding:4px 6px">Calls</th>`;
+    h += `<th style="padding:4px 6px">Latency</th>`;
+    h += `<th style="padding:4px 6px; width:35%">Share</th>`;
+    h += `</tr></thead><tbody>`;
+    (b.services || []).forEach(s => {
+      const ops = Object.entries(s.operations || {}).map(([op, n]) => `${op} (${n})`).join(', ');
+      h += `<tr style="border-bottom:1px solid rgba(255,255,255,0.05)">`;
+      h += `<td style="padding:6px 6px"><strong>${esc(s.service)}</strong><br><span class="muted" style="font-size:11px">${esc(ops)}</span></td>`;
+      h += `<td style="padding:6px 6px">${esc(s.calls)}</td>`;
+      h += `<td style="padding:6px 6px">${esc(s.total_ms)} ms</td>`;
+      h += `<td style="padding:6px 6px">`;
+      h += `<div style="display:flex; align-items:center; gap:8px">`;
+      h += `<div style="flex:1; background:#21262d; border-radius:4px; height:8px; overflow:hidden">`;
+      h += `<div style="width:${Math.min(100, s.percent)}%; background:var(--accent); height:8px"></div>`;
+      h += `</div>`;
+      h += `<span style="font-size:11px; width:36px; text-align:right">${esc(s.percent)}%</span>`;
+      h += `</div></td>`;
+      h += `</tr>`;
+    });
+    h += `</tbody></table></div>`;
+  } else if (b) {
+    h += `<p class="muted" style="font-size:12px; margin-top:12px">⚡ AWS Service Calls: <strong>0</strong> (Offline mock review — 0 ms AWS API latency).</p>`;
+  }
   return h + '</div>';
 }
 </script>

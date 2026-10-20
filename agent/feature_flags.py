@@ -43,6 +43,16 @@ def _norm(v, default: str = "off") -> str:
     return "on" if str(v or default).strip().lower() in ("on", "1", "true", "yes") else "off"
 
 
+try:
+    from telemetry import track_aws_call
+except ImportError:
+    from contextlib import contextmanager
+
+    @contextmanager
+    def track_aws_call(service, op, **kw):  # type: ignore[misc]
+        yield
+
+
 def get_flag(default: str = "off") -> str:
     """Current flag value ("on"/"off"). Cached briefly; falls back to default on
     any error (e.g. no SSM permission locally) so the page never breaks."""
@@ -50,7 +60,8 @@ def get_flag(default: str = "off") -> str:
     if _cache["value"] is not None and (now - _cache["ts"]) < _CACHE_TTL:
         return _cache["value"]
     try:
-        resp = _ssm().get_parameter(Name=FLAG_PARAM)
+        with track_aws_call("AWS Systems Manager", "ssm:GetParameter"):
+            resp = _ssm().get_parameter(Name=FLAG_PARAM)
         val = _norm(resp["Parameter"]["Value"], default)
     except Exception:
         val = default
@@ -68,7 +79,8 @@ def set_flag(value) -> dict:
     Returns {ok, value} or {ok: False, error}."""
     want = _norm(value)
     try:
-        _ssm().put_parameter(Name=FLAG_PARAM, Value=want, Type="String", Overwrite=True)
+        with track_aws_call("AWS Systems Manager", "ssm:PutParameter"):
+            _ssm().put_parameter(Name=FLAG_PARAM, Value=want, Type="String", Overwrite=True)
         _cache.update(value=want, ts=time.time())  # reflect immediately
         return {"ok": True, "value": want}
     except Exception as exc:

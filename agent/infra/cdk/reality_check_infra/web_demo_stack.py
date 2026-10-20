@@ -159,6 +159,8 @@ class WebDemoStack(Stack):
                 # AWS-Native S3 integration
                 "REALITY_CHECK_S3_BUCKET": data_bucket.bucket_name,
                 "BEDROCK_ENABLED": "true",
+                # Frugal default model on Amazon Bedrock ($0.06/$0.24 per 1M tokens)
+                "BEDROCK_MODEL_ID": "us.amazon.nova-lite-v1:0",
             },
             description="Public Reality Check demo & custom web portal.",
         )

@@ -17,6 +17,7 @@ import envload  # noqa: E402
 from minipdf import PdfDoc  # noqa: E402
 from telemetry import (  # noqa: E402 — structured logs + CloudWatch EMF metrics
     get_logger, log_event, timed, emit_metric, set_request_id, get_request_id,
+    track_aws_call,
 )
 
 envload.load_env()
@@ -128,6 +129,7 @@ class BoxDocs:
 
 
 class S3Docs:
+    """S3-backed storage provider for AWS-native operation without Box licenses."""
     kind = "s3"
 
     def __init__(self, bucket: Optional[str] = None) -> None:
@@ -142,7 +144,8 @@ class S3Docs:
         if not self.bucket:
             return []
         try:
-            resp = self.s3.list_objects_v2(Bucket=self.bucket, Prefix=prefix)
+            with track_aws_call("Amazon S3", "s3:ListObjectsV2"):
+                resp = self.s3.list_objects_v2(Bucket=self.bucket, Prefix=prefix)
             items = []
             for obj in resp.get("Contents", []):
                 key = obj["Key"]
@@ -162,17 +165,20 @@ class S3Docs:
         return self._list(self.evidence_prefix)
 
     def read(self, file_id: str) -> bytes:
-        resp = self.s3.get_object(Bucket=self.bucket, Key=file_id)
+        with track_aws_call("Amazon S3", "s3:GetObject"):
+            resp = self.s3.get_object(Bucket=self.bucket, Key=file_id)
         return resp["Body"].read()
 
     def upload_contract(self, name: str, data: bytes) -> Dict[str, str]:
         key = f"{self.contracts_prefix}{name}"
-        self.s3.put_object(Bucket=self.bucket, Key=key, Body=data, ContentType="application/pdf")
+        with track_aws_call("Amazon S3", "s3:PutObject"):
+            self.s3.put_object(Bucket=self.bucket, Key=key, Body=data, ContentType="application/pdf")
         return {"id": key, "name": name, "link": f"s3://{self.bucket}/{key}"}
 
     def upload_report(self, name: str, data: bytes) -> Dict[str, str]:
         key = f"{self.reports_prefix}{name}"
-        self.s3.put_object(Bucket=self.bucket, Key=key, Body=data, ContentType="application/pdf")
+        with track_aws_call("Amazon S3", "s3:PutObject"):
+            self.s3.put_object(Bucket=self.bucket, Key=key, Body=data, ContentType="application/pdf")
         return {"id": key, "link": f"s3://{self.bucket}/{key}"}
 
     def comment(self, file_id: str, message: str) -> str:
@@ -184,7 +190,8 @@ class S3Docs:
         except Exception:
             existing = ""
         new_content = (existing + "\n\n" + message).strip()
-        self.s3.put_object(Bucket=self.bucket, Key=sidecar_key, Body=new_content.encode("utf-8"), ContentType="text/plain")
+        with track_aws_call("Amazon S3", "s3:PutObject"):
+            self.s3.put_object(Bucket=self.bucket, Key=sidecar_key, Body=new_content.encode("utf-8"), ContentType="text/plain")
         return sidecar_key
 
 
@@ -261,15 +268,26 @@ def llm_review(client, contract_name: str, contract_text: str, sources: List[Dic
     # Time the model call and record token usage / failures so cost and latency
     # of the one external dependency (Bedrock) are visible in CloudWatch.
     try:
+        is_live = client.__class__.__name__ != "_CannedBedrock"
         with timed(_log, "bedrock.converse", model_id=MODEL_ID,
                    source_count=len(sources)) as span:
-            resp = client.converse(
-                modelId=MODEL_ID,
-                system=[{"text": REVIEW_SYSTEM}],
-                messages=[{"role": "user", "content": [{"text": "\n\n---\n\n".join(blocks)}]}],
-                toolConfig={"tools": [REVIEW_TOOL], "toolChoice": {"tool": {"name": "submit_review"}}},
-                inferenceConfig={"maxTokens": 4000, "temperature": 0},
-            )
+            if is_live:
+                with track_aws_call("Amazon Bedrock", f"bedrock:Converse ({MODEL_ID})"):
+                    resp = client.converse(
+                        modelId=MODEL_ID,
+                        system=[{"text": REVIEW_SYSTEM}],
+                        messages=[{"role": "user", "content": [{"text": "\n\n---\n\n".join(blocks)}]}],
+                        toolConfig={"tools": [REVIEW_TOOL], "toolChoice": {"tool": {"name": "submit_review"}}},
+                        inferenceConfig={"maxTokens": 4000, "temperature": 0},
+                    )
+            else:
+                resp = client.converse(
+                    modelId=MODEL_ID,
+                    system=[{"text": REVIEW_SYSTEM}],
+                    messages=[{"role": "user", "content": [{"text": "\n\n---\n\n".join(blocks)}]}],
+                    toolConfig={"tools": [REVIEW_TOOL], "toolChoice": {"tool": {"name": "submit_review"}}},
+                    inferenceConfig={"maxTokens": 4000, "temperature": 0},
+                )
             usage = resp.get("usage", {}) or {}
             span["input_tokens"] = usage.get("inputTokens")
             span["output_tokens"] = usage.get("outputTokens")

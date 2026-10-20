@@ -90,6 +90,9 @@ def test_review_returns_claims_and_summary():
     assert len(res["claims"]) == 5
     assert res["summary"]["Risk identified"] == 3
     assert res["comments_posted"] == 5
+    assert "aws_breakdown" in res
+    assert "total_calls" in res["aws_breakdown"]
+    assert "total_aws_ms" in res["aws_breakdown"]
     # every claim carries the fields the UI renders
     for c in res["claims"]:
         assert c["location"] and c["result"] and c["severity"] in ("High", "Medium", "None")
@@ -136,6 +139,19 @@ def test_upload_contract_and_review():
     assert r_run["statusCode"] == 200
     res_run = json.loads(r_run["body"])["result"]
     assert len(res_run["claims"]) > 0
+
+    # 5. Stream generated report PDF for custom contract
+    r_rep = web.lambda_handler(_ev("GET", "/report.pdf", qs={"contract": key}))
+    assert r_rep["statusCode"] == 200
+    assert r_rep["headers"]["content-type"] == "application/pdf"
+    assert base64.b64decode(r_rep["body"]).startswith(b"%PDF-")
+
+
+def test_unknown_contract_pdf_404():
+    r_con = web.lambda_handler(_ev("GET", "/contract.pdf", qs={"contract": "nonexistent-doc"}))
+    assert r_con["statusCode"] == 404
+    r_rep = web.lambda_handler(_ev("GET", "/report.pdf", qs={"contract": "nonexistent-doc"}))
+    assert r_rep["statusCode"] == 404
 
 
 def test_report_pdf_streams_bytes():

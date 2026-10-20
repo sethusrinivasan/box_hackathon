@@ -242,6 +242,82 @@ def timed(logger: logging.Logger, op: str, level: int = logging.INFO,
         log_event(logger, f"{op}.ok", level=level, duration_ms=dur, **fields, **extra)
 
 
+# ---------------------------------------------------------------------------
+# AWS Service Call & Latency Tracking
+# ---------------------------------------------------------------------------
+class AwsCallTracker:
+    """Tracks AWS service calls and latencies for request observability."""
+
+    def __init__(self) -> None:
+        self.calls: list[Dict[str, Any]] = []
+
+    def record(self, service: str, operation: str, duration_ms: float, **extra: Any) -> None:
+        self.calls.append({
+            "service": service,
+            "operation": operation,
+            "duration_ms": round(duration_ms, 1),
+            **extra,
+        })
+
+    def summary(self) -> Dict[str, Any]:
+        by_svc: Dict[str, Dict[str, Any]] = {}
+        total_ms = 0.0
+        for c in self.calls:
+            s = c["service"]
+            dur = c["duration_ms"]
+            total_ms += dur
+            if s not in by_svc:
+                by_svc[s] = {"service": s, "calls": 0, "total_ms": 0.0, "operations": {}}
+            by_svc[s]["calls"] += 1
+            by_svc[s]["total_ms"] = round(by_svc[s]["total_ms"] + dur, 1)
+            op = c["operation"]
+            by_svc[s]["operations"][op] = by_svc[s]["operations"].get(op, 0) + 1
+
+        services_list = []
+        for s, data in sorted(by_svc.items(), key=lambda x: x[1]["total_ms"], reverse=True):
+            pct = round((data["total_ms"] / total_ms * 100), 1) if total_ms > 0 else 0.0
+            services_list.append({
+                "service": s,
+                "calls": data["calls"],
+                "total_ms": data["total_ms"],
+                "percent": pct,
+                "operations": data["operations"],
+            })
+
+        return {
+            "total_aws_ms": round(total_ms, 1),
+            "total_calls": len(self.calls),
+            "services": services_list,
+        }
+
+
+_AWS_TRACKER: ContextVar[Optional[AwsCallTracker]] = ContextVar("rc_aws_tracker", default=None)
+
+
+@contextmanager
+def capture_aws_calls() -> Iterator[AwsCallTracker]:
+    """Capture all AWS service calls made within this context block."""
+    tracker = AwsCallTracker()
+    token = _AWS_TRACKER.set(tracker)
+    try:
+        yield tracker
+    finally:
+        _AWS_TRACKER.reset(token)
+
+
+@contextmanager
+def track_aws_call(service: str, operation: str, **extra: Any) -> Iterator[None]:
+    """Time an AWS service call and record it in the active tracker if bound."""
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        dur = (time.perf_counter() - start) * 1000
+        tracker = _AWS_TRACKER.get()
+        if tracker is not None:
+            tracker.record(service, operation, dur, **extra)
+
+
 def _in_lambda() -> bool:
     """True when running inside AWS Lambda (the runtime sets this env var)."""
     return bool(os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
