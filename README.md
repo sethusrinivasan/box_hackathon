@@ -189,6 +189,7 @@ docs/contracts, evidence  demo docs (Markdown source)
 docs/box_upload/          the same docs as PDFs, ready to upload to Box
 docs/build_pdfs.py        rebuild the PDFs after editing the Markdown
 PRD.md                    product requirements
+SUBMISSION.md             complete hackathon submission dossier & checklist
 PRESENTATION.md           pitch deck slides & speaker notes (6 slides, 3 min)
 DEMO_SCRIPT.md            timed 3-minute video recording script & judge Q&A playbook
 PRESENTATION_OUTLINE.md   pitch deck outline
