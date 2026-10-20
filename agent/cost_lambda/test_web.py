@@ -58,11 +58,20 @@ def test_latency_tracker_summary():
 def test_latency_tracker_cold_resume_flag():
     tracker = LatencyTracker()
     tracker.cold_resume = True
-    tracker.record("Amazon Aurora PostgreSQL", "psycopg:connect (cold resume)", 12500.0)
+    tracker.record("Amazon Aurora PostgreSQL", "Aurora Serverless v2 [Compute cold resume (0 → 0.5 ACU)]", 10540.0)
+    tracker.record("Amazon Aurora PostgreSQL", "psycopg:connect [Server IAM auth]", 397.3)
+    tracker.record("Amazon Aurora PostgreSQL", "psycopg:connect [TLS handshake - TLSv1.3]", 65.0)
+    tracker.record("Amazon Aurora PostgreSQL", "psycopg:connect [TCP connect]", 25.0)
 
     summary = tracker.summary()
     assert summary["cold_resume"] is True
     assert "Cold Resume" in summary["database_status"]
+    aurora = next(s for s in summary["services"] if s["service"] == "Amazon Aurora PostgreSQL")
+    assert len(aurora["sub_operations"]) == 4
+    cold_op = next(op for op in aurora["sub_operations"] if "Compute cold resume" in op["operation"])
+    assert cold_op["total_ms"] == 10540.0
+    auth_op = next(op for op in aurora["sub_operations"] if "Server IAM auth" in op["operation"])
+    assert auth_op["total_ms"] == 397.3
 
 
 def test_render_includes_latency_breakdown():

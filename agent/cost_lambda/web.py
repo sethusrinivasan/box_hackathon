@@ -43,7 +43,7 @@ DAYS = int(os.environ.get("COST_WINDOW_DAYS", "30"))
 _rds = boto3.client("rds", region_name=REGION)
 
 
-def _connect_phased(conninfo: str, timeout_sec: float = 12.0) -> tuple[psycopg.Connection, dict[str, float]]:
+def _connect_phased(conninfo: str, timeout_sec: float = 14.0) -> tuple[psycopg.Connection, dict[str, float]]:
     """Connect via libpq nonblocking generator, tracking TCP, TLS, and IAM auth phases."""
     from psycopg import pq
     t_start = time.perf_counter()
@@ -53,6 +53,7 @@ def _connect_phased(conninfo: str, timeout_sec: float = 12.0) -> tuple[psycopg.C
     t_auth = 0.0
     t_tls_start = None
     t_auth_start = None
+    t_first_data_after_awaiting = None
     deadline = t_start + timeout_sec
     while True:
         now = time.perf_counter()
@@ -71,13 +72,19 @@ def _connect_phased(conninfo: str, timeout_sec: float = 12.0) -> tuple[psycopg.C
             else:
                 t_tcp = (t_auth_start - t_start) * 1000
         if st == pq.PollingStatus.OK:
-            t_auth = (time.perf_counter() - (t_auth_start or t_start)) * 1000
+            t_end = time.perf_counter()
+            if t_first_data_after_awaiting:
+                t_auth = (t_end - t_first_data_after_awaiting) * 1000
+            else:
+                t_auth = (t_end - (t_auth_start or t_start)) * 1000
             break
         elif st == pq.PollingStatus.FAILED:
             err = pgconn.get_error_message("utf-8")
             raise psycopg.OperationalError(f"connection failed: {err}")
         elif st == pq.PollingStatus.READING:
             r, _, _ = select.select([pgconn.socket], [], [], max(0.1, deadline - now))
+            if r and t_auth_start is not None and t_first_data_after_awaiting is None:
+                t_first_data_after_awaiting = time.perf_counter()
             if not r and time.perf_counter() > deadline:
                 raise psycopg.OperationalError("connection timed out while reading")
         elif st == pq.PollingStatus.WRITING:
@@ -85,10 +92,16 @@ def _connect_phased(conninfo: str, timeout_sec: float = 12.0) -> tuple[psycopg.C
             if not w and time.perf_counter() > deadline:
                 raise psycopg.OperationalError("connection timed out while writing")
     pgconn.nonblocking = 1
+
+    cold_wait_ms = 0.0
+    if t_auth_start and t_first_data_after_awaiting:
+        cold_wait_ms = (t_first_data_after_awaiting - t_auth_start) * 1000
+
     return psycopg.Connection(pgconn), {
         "tcp_ms": round(t_tcp, 1),
         "tls_ms": round(t_tls, 1),
         "auth_ms": round(t_auth, 1),
+        "cold_wait_ms": round(cold_wait_ms, 1),
     }
 
 
@@ -124,7 +137,18 @@ def _connect(tracker: LatencyTracker | None = None) -> psycopg.Connection:
                 phases = {"tcp_ms": 0.0, "tls_ms": total_dur * 0.4, "auth_ms": total_dur * 0.6}
 
             elapsed_ms = (time.perf_counter() - started) * 1000
-            is_cold = attempt > 0 or elapsed_ms > 2500
+            cold_wait = phases.get("cold_wait_ms", 0.0)
+            is_cold = attempt > 0 or cold_wait > 1500 or elapsed_ms > 2500
+
+            cold_resume_ms = 0.0
+            if is_cold:
+                # If there were prior failed attempts (e.g. timeout during auto-pause), include that time
+                retry_time_ms = (t0 - started) * 1000 if attempt > 0 else 0.0
+                if cold_wait > 500:
+                    cold_resume_ms = retry_time_ms + cold_wait
+                else:
+                    cold_resume_ms = max(0.0, elapsed_ms - phases["tcp_ms"] - phases["tls_ms"] - 300.0)
+                    phases["auth_ms"] = min(phases["auth_ms"], 300.0)
 
             tls_ver = "TLSv1.3"
             tls_cipher = ""
@@ -142,11 +166,16 @@ def _connect(tracker: LatencyTracker | None = None) -> psycopg.Connection:
                 tracker.cold_resume = is_cold
                 tracker.tls_version = tls_ver
                 tracker.tls_cipher = tls_cipher
-                cold_tag = " (cold resume)" if is_cold else ""
+                if cold_resume_ms > 0:
+                    tracker.record(
+                        "Amazon Aurora PostgreSQL",
+                        "Aurora Serverless v2 [Compute cold resume (0 → 0.5 ACU)]",
+                        cold_resume_ms,
+                    )
                 if phases["tcp_ms"] > 1.0:
-                    tracker.record("Amazon Aurora PostgreSQL", f"psycopg:connect [TCP connect]{cold_tag}", phases["tcp_ms"])
-                tracker.record("Amazon Aurora PostgreSQL", f"psycopg:connect [TLS handshake - {tls_ver}]{cold_tag}", phases["tls_ms"])
-                tracker.record("Amazon Aurora PostgreSQL", f"psycopg:connect [Server IAM auth]{cold_tag}", phases["auth_ms"])
+                    tracker.record("Amazon Aurora PostgreSQL", "psycopg:connect [TCP connect]", phases["tcp_ms"])
+                tracker.record("Amazon Aurora PostgreSQL", f"psycopg:connect [TLS handshake - {tls_ver}]", phases["tls_ms"])
+                tracker.record("Amazon Aurora PostgreSQL", "psycopg:connect [Server IAM auth]", phases["auth_ms"])
             emit_metric("DbConnectLatencyMs", round(elapsed_ms, 1), "Milliseconds",
                         fn="web")
             emit_metric("DbColdResume", 1 if is_cold else 0, "Count", fn="web")
