@@ -34,6 +34,7 @@ from constructs import Construct
 
 NAMESPACE = "RealityCheck"
 COST_NAMESPACE = "RealityCheckCost"
+CDC_NAMESPACE = "RealityCheckCDC"
 
 # Lambda's configured timeout (agent/infra/setup.md: --timeout 60).
 LAMBDA_TIMEOUT_MS = 60_000
@@ -87,11 +88,11 @@ class ObservabilityStack(Stack):
                 markdown=(
                     f"# Reality Check &mdash; Ops & Utilization\n"
                     f"Lambda **`{function_name}`** &nbsp;·&nbsp; region **`{self.region}`** "
-                    f"&nbsp;·&nbsp; metrics **`{NAMESPACE}`** / **`{COST_NAMESPACE}`** "
+                    f"&nbsp;·&nbsp; metrics **`{NAMESPACE}`** / **`{COST_NAMESPACE}`** / **`{CDC_NAMESPACE}`** "
                     "(emitted when functions run with `EMIT_METRICS=true`)\n\n"
                     "**1** Service health &nbsp;·&nbsp; **2** Throughput & Bedrock "
                     "&nbsp;·&nbsp; **3** Review KPIs &nbsp;·&nbsp; **4** Canary "
-                    "&nbsp;·&nbsp; **5** Aurora cost-infra"
+                    "&nbsp;·&nbsp; **5** Aurora cost-infra &nbsp;·&nbsp; **6** Serverless DuckDB CDC"
                 ),
                 width=24,
                 height=2,
@@ -175,6 +176,21 @@ class ObservabilityStack(Stack):
              "should be zero; sustained = resume exceeds timeout"),
         ))
 
+        # Row 6 — Serverless DuckDB CDC & Analytics pipeline (RealityCheckCDC namespace)
+        dashboard.add_widgets(
+            self._cdc_lag_widget(),
+            self._cdc_query_latency_widget(),
+            self._cdc_sync_worker_widget(),
+        )
+        dashboard.add_widgets(self._legend(
+            ("CDC replication lag (seconds / bytes)",
+             "delay from Aurora commit to DuckDB in S3; >300s indicates sync delay"),
+            ("DuckDB query latency (p50 / p99) & cache hits",
+             "in-process analytical speed; cache hits execute in <1ms without S3 fetch"),
+            ("CDC sync worker & full re-inits",
+             "events processed per 5m sync; re-init counts snapshot resyncs"),
+        ))
+
         CfnOutput(
             self,
             "DashboardURL",
@@ -233,6 +249,18 @@ class ObservabilityStack(Stack):
             metric_name=metric_name,
             statistic=stat,
             period=Duration.hours(1),
+            label=label,
+            color=color,
+        )
+
+    def _cdc_metric(self, metric_name: str, *, stat: str = "Average",
+                    label: Optional[str] = None,
+                    color: Optional[str] = None) -> cw.Metric:
+        return cw.Metric(
+            namespace=CDC_NAMESPACE,
+            metric_name=metric_name,
+            statistic=stat,
+            period=Duration.minutes(5),
             label=label,
             color=color,
         )
@@ -461,6 +489,70 @@ class ObservabilityStack(Stack):
         )
 
     # ------------------------------------------------------------------ #
+    # Row 6 — Serverless DuckDB CDC & Analytics (RealityCheckCDC namespace)
+    # ------------------------------------------------------------------ #
+    def _cdc_lag_widget(self) -> cw.GraphWidget:
+        return cw.GraphWidget(
+            title="CDC replication freshness & lag",
+            width=8,
+            height=4,
+            left=[
+                self._cdc_metric("ReplicationLagSeconds", stat="p90",
+                                 label="Replication lag (p90 s)", color=AMBER),
+            ],
+            right=[
+                self._cdc_metric("ReplicationLagBytes", stat="Maximum",
+                                 label="Replication lag (bytes)", color=BLUE),
+            ],
+            left_y_axis=cw.YAxisProps(min=0, label="seconds"),
+            right_y_axis=cw.YAxisProps(min=0, label="bytes"),
+            left_annotations=[
+                cw.HorizontalAnnotation(value=300, label="5m sync threshold", color=RED),
+            ],
+        )
+
+    def _cdc_query_latency_widget(self) -> cw.GraphWidget:
+        return cw.GraphWidget(
+            title="DuckDB analytical query latency & cache hits",
+            width=8,
+            height=4,
+            left=[
+                self._cdc_metric("ReaderQueryDurationMs", stat="p50",
+                                 label="Query latency p50 (ms)", color=GREEN),
+                self._cdc_metric("ReaderQueryDurationMs", stat="p99",
+                                 label="Query latency p99 (ms)", color=BLUE),
+            ],
+            right=[
+                self._cdc_metric("ReaderCacheHit", stat="Sum",
+                                 label="Container cache hits", color=PURPLE),
+            ],
+            left_y_axis=cw.YAxisProps(min=0, label="ms"),
+            right_y_axis=cw.YAxisProps(min=0, label="hits"),
+            left_annotations=[
+                cw.HorizontalAnnotation(value=1000, label="1s budget", color=AMBER),
+            ],
+        )
+
+    def _cdc_sync_worker_widget(self) -> cw.GraphWidget:
+        return cw.GraphWidget(
+            title="CDC worker sync duration & re-inits",
+            width=8,
+            height=4,
+            left=[
+                self._cdc_metric("SyncDurationMs", stat="Average",
+                                 label="Sync duration (ms)", color=BLUE),
+            ],
+            right=[
+                self._cdc_metric("EventsProcessed", stat="Sum",
+                                 label="WAL changes applied", color=GREEN),
+                self._cdc_metric("FullReInitCount", stat="Sum",
+                                 label="Full snapshot syncs", color=AMBER),
+            ],
+            left_y_axis=cw.YAxisProps(min=0, label="ms"),
+            right_y_axis=cw.YAxisProps(min=0, label="count"),
+        )
+
+    # ------------------------------------------------------------------ #
     # Alarms
     # ------------------------------------------------------------------ #
     def _build_alarms(self, lambda_dims: dict,
@@ -528,6 +620,25 @@ class ObservabilityStack(Stack):
                 evaluation_periods=1,
                 comparison_operator=cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
                 treat_missing_data=cw.TreatMissingData.BREACHING,
+            )
+        )
+
+        # Alarm if DuckDB CDC replication lag exceeds 15 minutes (3 sync intervals)
+        alarms.append(
+            cw.Alarm(
+                self,
+                "CdcReplicationLagAlarm",
+                alarm_name=f"{dashboard_name}-CdcReplicationLag",
+                alarm_description=(
+                    "DuckDB CDC pipeline replication lag from Aurora exceeds 15 minutes, "
+                    "indicating sync worker delays or lock contention."
+                ),
+                metric=self._cdc_metric("ReplicationLagSeconds", stat="Maximum").with_(
+                    period=Duration.minutes(5)),
+                threshold=900,
+                evaluation_periods=3,
+                comparison_operator=cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+                treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
             )
         )
 
