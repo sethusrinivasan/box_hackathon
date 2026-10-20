@@ -194,6 +194,49 @@ def test_fetch_costs_mocked():
         assert data["top_services"][0]["trend"] == [0.5]
 
 
+def test_fetch_costs_cold_resume_runs_twice_and_probes_warm():
+    mock_cur = MagicMock()
+    mock_cur.fetchall.return_value = [
+        (
+            dt.date(2026, 10, 18),
+            0.50,
+            0.0,
+            "USD",
+            {"Amazon RDS": 0.50},
+            "FREE",
+            150.0,
+            50.0,
+            200.0,
+            dt.date(2027, 1, 1),
+            {"binding_limit": "expiry"},
+        )
+    ]
+    mock_cur.fetchone.return_value = [10]
+
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+    mock_conn.__enter__.return_value = mock_conn
+
+    def mock_connect_impl(tracker=None):
+        if tracker:
+            tracker.cold_resume = True
+            tracker.record("Amazon Aurora PostgreSQL", "Aurora Serverless v2 [Compute cold resume (0 → 0.5 ACU)]", 10540.0)
+            tracker.record("Amazon Aurora PostgreSQL", "psycopg:connect [Server IAM auth]", 397.3)
+        return mock_conn
+
+    with patch("web._connect", side_effect=mock_connect_impl), \
+         patch("web._connect_phased", return_value=(MagicMock(), {"auth_ms": 68.2, "tcp_ms": 20.0, "tls_ms": 40.0})):
+        data = web._fetch_costs()
+        breakdown = data["latency_breakdown"]
+        assert breakdown["cold_resume"] is True
+        aurora = next(s for s in breakdown["services"] if s["service"] == "Amazon Aurora PostgreSQL")
+        op_names = [sub["operation"] for sub in aurora["sub_operations"]]
+        assert any("Compute cold resume" in name for name in op_names)
+        assert any("run 1 - post-resume buffer" in name for name in op_names)
+        assert any("run 2 - warm buffer pool" in name for name in op_names)
+        assert any("Warm baseline re-check" in name for name in op_names)
+
+
 def test_web_routes():
     # /healthz
     res = web.lambda_handler({"requestContext": {"http": {"method": "GET", "path": "/healthz"}}})
@@ -216,6 +259,8 @@ if __name__ == "__main__":
     print("PASS test_sparkline_svg_rendering")
     test_fetch_costs_mocked()
     print("PASS test_fetch_costs_mocked")
+    test_fetch_costs_cold_resume_runs_twice_and_probes_warm()
+    print("PASS test_fetch_costs_cold_resume_runs_twice_and_probes_warm")
     test_web_routes()
     print("PASS test_web_routes")
-    print("\n6 passed, 0 failed")
+    print("\n7 passed, 0 failed")

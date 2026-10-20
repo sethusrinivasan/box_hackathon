@@ -258,18 +258,32 @@ def _fetch_costs() -> dict:
     tracker = LatencyTracker()
     with _connect(tracker) as conn:
         with conn.cursor() as cur:
-            t0 = time.perf_counter()
-            cur.execute(
+            query_sql = (
                 "SELECT usage_date, gross_usd, net_usd, currency, "
                 "       COALESCE(gross_services, services), plan_type, "
                 "       credits_remaining_usd, credits_consumed_usd, "
                 "       credits_granted_usd, credits_expiry, projection "
-                "FROM daily_cost WHERE usage_date >= %s ORDER BY usage_date DESC;",
-                (cutoff,),
+                "FROM daily_cost WHERE usage_date >= %s ORDER BY usage_date DESC;"
             )
+            t0 = time.perf_counter()
+            cur.execute(query_sql, (cutoff,))
             raw_rows = cur.fetchall()
-            tracker.record("Amazon Aurora PostgreSQL", "Query daily_cost (30 days)",
-                           (time.perf_counter() - t0) * 1000, row_count=len(raw_rows))
+            q1_ms = (time.perf_counter() - t0) * 1000
+
+            if tracker.cold_resume:
+                tracker.record("Amazon Aurora PostgreSQL", "Query daily_cost (run 1 - post-resume buffer)",
+                               q1_ms, row_count=len(raw_rows))
+                # Run 2: repeat same query on active session to isolate warm buffer pool execution
+                t0_warm = time.perf_counter()
+                cur.execute(query_sql, (cutoff,))
+                cur.fetchall()
+                q2_ms = (time.perf_counter() - t0_warm) * 1000
+                tracker.record("Amazon Aurora PostgreSQL", "Query daily_cost (run 2 - warm buffer pool)",
+                               q2_ms, row_count=len(raw_rows))
+            else:
+                tracker.record("Amazon Aurora PostgreSQL", "Query daily_cost (30 days)",
+                               q1_ms, row_count=len(raw_rows))
+
             for (d, gross, net, cur_code, services, plan_type, rem, cons,
                  granted, expiry, projection) in raw_rows:
                 rows.append({
@@ -298,6 +312,29 @@ def _fetch_costs() -> dict:
                                (time.perf_counter() - t0) * 1000)
             except Exception:  # table may not exist on a pre-migration DB
                 resource_count = 0
+
+    if tracker.cold_resume:
+        # Benchmark warm connect with pure IAM Auth on the now-active instance
+        try:
+            t_probe = time.perf_counter()
+            token_probe = _rds.generate_db_auth_token(
+                DBHostname=DB_HOST, Port=DB_PORT, DBUsername=DB_IAM_USER, Region=REGION
+            )
+            tracker.record("AWS RDS", "rds:generate_db_auth_token (warm probe)", (time.perf_counter() - t_probe) * 1000)
+            probe_conninfo = (
+                f"host={DB_HOST} port={DB_PORT} dbname={DB_NAME} user={DB_IAM_USER} "
+                f"password={token_probe} sslmode=verify-full sslrootcert={certifi.where()} "
+                f"connect_timeout=8"
+            )
+            probe_conn, probe_phases = _connect_phased(probe_conninfo, timeout_sec=8.0)
+            probe_conn.close()
+            tracker.record(
+                "Amazon Aurora PostgreSQL",
+                f"psycopg:connect [Warm baseline re-check (pure IAM auth: {probe_phases['auth_ms']:.1f}ms)]",
+                probe_phases["auth_ms"],
+            )
+        except Exception:
+            pass
 
     window_gross = round(sum(r["gross_usd"] for r in rows), 4)
     window_net = round(sum(r["net_usd"] for r in rows), 4)
