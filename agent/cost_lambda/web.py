@@ -125,12 +125,27 @@ def _connect(tracker: LatencyTracker | None = None) -> psycopg.Connection:
 
             elapsed_ms = (time.perf_counter() - started) * 1000
             is_cold = attempt > 0 or elapsed_ms > 2500
+
+            tls_ver = "TLSv1.3"
+            tls_cipher = ""
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT version, cipher FROM pg_stat_ssl WHERE pid = pg_backend_pid();")
+                    ssl_row = cur.fetchone()
+                    if ssl_row and ssl_row[0]:
+                        tls_ver = ssl_row[0]
+                        tls_cipher = ssl_row[1] or ""
+            except Exception:
+                tls_ver = "TLSv1.3"
+
             if tracker:
                 tracker.cold_resume = is_cold
+                tracker.tls_version = tls_ver
+                tracker.tls_cipher = tls_cipher
                 cold_tag = " (cold resume)" if is_cold else ""
                 if phases["tcp_ms"] > 1.0:
                     tracker.record("Amazon Aurora PostgreSQL", f"psycopg:connect [TCP connect]{cold_tag}", phases["tcp_ms"])
-                tracker.record("Amazon Aurora PostgreSQL", f"psycopg:connect [TLS handshake]{cold_tag}", phases["tls_ms"])
+                tracker.record("Amazon Aurora PostgreSQL", f"psycopg:connect [TLS handshake - {tls_ver}]{cold_tag}", phases["tls_ms"])
                 tracker.record("Amazon Aurora PostgreSQL", f"psycopg:connect [Server IAM auth]{cold_tag}", phases["auth_ms"])
             emit_metric("DbConnectLatencyMs", round(elapsed_ms, 1), "Milliseconds",
                         fn="web")
@@ -365,6 +380,9 @@ def _render(data: dict) -> str:
         total_calls = b.get("total_calls", 0)
         total_ms = b.get("total_ms", 0.0)
         status_label = b.get("database_status", "Aurora Serverless v2")
+        tls_ver = b.get("tls_version")
+        if tls_ver and tls_ver not in status_label:
+            status_label = f"{status_label} · {tls_ver}"
         status_color = "#d29922" if b.get("cold_resume") else "#3fb950"
         breakdown_rows = ""
         for s in b.get("services", []):

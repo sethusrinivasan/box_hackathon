@@ -29,6 +29,8 @@ import web
 
 def test_latency_tracker_summary():
     tracker = LatencyTracker()
+    tracker.tls_version = "TLSv1.3"
+    tracker.tls_cipher = "TLS_AES_256_GCM_SHA384"
     tracker.record("AWS RDS", "rds:generate_db_auth_token", 10.0)
     tracker.record("Amazon Aurora PostgreSQL", "psycopg:connect (TLS + IAM auth)", 90.0)
     tracker.record("Amazon Aurora PostgreSQL", "Query daily_cost (30 days)", 20.0)
@@ -37,6 +39,8 @@ def test_latency_tracker_summary():
     assert summary["total_calls"] == 3
     assert summary["total_ms"] == 120.0
     assert summary["cold_resume"] is False
+    assert summary["tls_version"] == "TLSv1.3"
+    assert summary["tls_cipher"] == "TLS_AES_256_GCM_SHA384"
     assert "Warm" in summary["database_status"]
     assert len(summary["services"]) == 2
 
@@ -83,6 +87,7 @@ def test_render_includes_latency_breakdown():
             "total_ms": 150.5,
             "total_calls": 3,
             "cold_resume": False,
+            "tls_version": "TLSv1.3",
             "database_status": "Aurora Serverless v2 (Warm)",
             "services": [
                 {
@@ -112,7 +117,7 @@ def test_render_includes_latency_breakdown():
 
     html = web._render(mock_data)
     assert "AWS Service &amp; Aurora Latency Breakdown" in html
-    assert "Aurora Serverless v2 (Warm)" in html
+    assert "Aurora Serverless v2 (Warm) · TLSv1.3" in html
     assert "150.5 ms" in html
     assert "Amazon Aurora PostgreSQL" in html
     assert "Trend (30d)" in html

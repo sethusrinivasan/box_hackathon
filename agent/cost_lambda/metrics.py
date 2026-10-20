@@ -56,6 +56,8 @@ class LatencyTracker:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
         self.cold_resume: bool = False
+        self.tls_version: str | None = None
+        self.tls_cipher: str | None = None
 
     def record(self, service: str, operation: str, duration_ms: float, **extra: Any) -> None:
         self.calls.append({
@@ -107,10 +109,15 @@ class LatencyTracker:
 
         status = ("Aurora Serverless v2 (Cold Resume)" if self.cold_resume
                   else "Aurora Serverless v2 (Warm)")
-        return {
+        res: dict[str, Any] = {
             "total_ms": round(total_ms, 1),
             "total_calls": len(self.calls),
             "cold_resume": self.cold_resume,
             "database_status": status,
             "services": services_list,
         }
+        if self.tls_version:
+            res["tls_version"] = self.tls_version
+        if self.tls_cipher:
+            res["tls_cipher"] = self.tls_cipher
+        return res
