@@ -259,6 +259,7 @@ def _fetch_costs() -> dict:
     rows = []
     credit = {}          # latest-day credit snapshot
     resource_count = 0
+    resources_by_app: dict[str, int] = {}
     tracker = LatencyTracker()
     with _connect(tracker) as conn:
         with conn.cursor() as cur:
@@ -266,12 +267,27 @@ def _fetch_costs() -> dict:
                 "SELECT usage_date, gross_usd, net_usd, currency, "
                 "       COALESCE(gross_services, services), plan_type, "
                 "       credits_remaining_usd, credits_consumed_usd, "
-                "       credits_granted_usd, credits_expiry, projection "
+                "       credits_granted_usd, credits_expiry, projection, "
+                "       COALESCE(application_name, 'RealityChecker'), "
+                "       COALESCE(gross_applications, applications) "
                 "FROM daily_cost WHERE usage_date >= %s ORDER BY usage_date DESC;"
             )
             t0 = time.perf_counter()
-            cur.execute(query_sql, (cutoff,))
-            raw_rows = cur.fetchall()
+            try:
+                cur.execute(query_sql, (cutoff,))
+                raw_rows = cur.fetchall()
+            except Exception:
+                # Fallback if application_name columns are not yet queried
+                fallback_sql = (
+                    "SELECT usage_date, gross_usd, net_usd, currency, "
+                    "       COALESCE(gross_services, services), plan_type, "
+                    "       credits_remaining_usd, credits_consumed_usd, "
+                    "       credits_granted_usd, credits_expiry, projection "
+                    "FROM daily_cost WHERE usage_date >= %s ORDER BY usage_date DESC;"
+                )
+                cur.execute(fallback_sql, (cutoff,))
+                raw_rows = cur.fetchall()
+
             q1_ms = (time.perf_counter() - t0) * 1000
 
             if tracker.cold_resume:
@@ -288,14 +304,31 @@ def _fetch_costs() -> dict:
                 tracker.record("Amazon Aurora PostgreSQL", "Query daily_cost (30 days)",
                                q1_ms, row_count=len(raw_rows))
 
-            for (d, gross, net, cur_code, services, plan_type, rem, cons,
-                 granted, expiry, projection) in raw_rows:
+            for row in raw_rows:
+                d = row[0]
+                gross = row[1]
+                net = row[2]
+                cur_code = row[3]
+                services = row[4]
+                plan_type = row[5]
+                rem = row[6]
+                cons = row[7]
+                granted = row[8]
+                expiry = row[9]
+                projection = row[10]
+                app_name = row[11] if len(row) > 11 and row[11] else "RealityChecker"
+                app_costs = row[12] if len(row) > 12 and row[12] else None
+                if not app_costs and _f(gross) > 0:
+                    app_costs = {app_name: _f(gross)}
+
                 rows.append({
                     "date": d.isoformat(),
+                    "application_name": app_name,
                     "gross_usd": _f(gross),
                     "net_usd": _f(net),
                     "currency": cur_code,
                     "services": services or {},
+                    "applications": app_costs or {app_name: _f(gross)},
                 })
                 # First (latest) row carries the current credit snapshot.
                 if not credit:
@@ -307,11 +340,28 @@ def _fetch_costs() -> dict:
                         "credits_expiry": expiry.isoformat() if expiry else None,
                         "projection": projection or {},
                     }
-            # Resource inventory summary (count + newest-seen), best-effort.
+            # Resource inventory summary (count + grouped by application_name), best-effort.
             try:
                 t0 = time.perf_counter()
-                cur.execute("SELECT count(*) FROM resource_inventory;")
-                resource_count = int(cur.fetchone()[0])
+                try:
+                    cur.execute("SELECT COALESCE(application_name, 'RealityChecker'), count(*) FROM resource_inventory GROUP BY application_name;")
+                    inv_rows = cur.fetchall()
+                    for item in inv_rows:
+                        if len(item) == 2:
+                            resources_by_app[str(item[0])] = int(item[1])
+                        elif len(item) == 1:
+                            resource_count = int(item[0])
+                except Exception:
+                    cur.execute("SELECT count(*) FROM resource_inventory;")
+                    res_row = cur.fetchone()
+                    if res_row:
+                        resource_count = int(res_row[0])
+
+                if resources_by_app:
+                    resource_count = sum(resources_by_app.values())
+                elif resource_count > 0:
+                    resources_by_app["RealityChecker"] = resource_count
+
                 tracker.record("Amazon Aurora PostgreSQL", "Query resource_inventory count",
                                (time.perf_counter() - t0) * 1000)
             except Exception:  # table may not exist on a pre-migration DB
@@ -367,16 +417,48 @@ def _fetch_costs() -> dict:
 
     window_gross = round(sum(r["gross_usd"] for r in rows), 4)
     window_net = round(sum(r["net_usd"] for r in rows), 4)
+
+    # Roll up GROSS spend by ApplicationName across the window.
+    by_application: dict[str, dict] = {}
+    for r in rows:
+        app_map = r.get("applications") or {r.get("application_name", "RealityChecker"): r["gross_usd"]}
+        for app_n, amt in app_map.items():
+            if app_n not in by_application:
+                by_application[app_n] = {"gross_usd": 0.0, "net_usd": 0.0, "resource_count": resources_by_app.get(app_n, 0)}
+            by_application[app_n]["gross_usd"] = round(by_application[app_n]["gross_usd"] + _f(amt), 6)
+            by_application[app_n]["net_usd"] = round(by_application[app_n]["net_usd"] + _f(r.get("net_usd", 0.0) if len(app_map) == 1 else 0.0), 6)
+
+    for app_n, cnt in resources_by_app.items():
+        if app_n not in by_application:
+            by_application[app_n] = {"gross_usd": 0.0, "net_usd": 0.0, "resource_count": cnt}
+
     # Roll up GROSS spend by service across the window.
     by_service: dict[str, float] = {}
     for r in rows:
         for svc, amt in r["services"].items():
-            by_service[svc] = round(by_service.get(svc, 0.0) + float(amt), 6)
+            by_service[svc] = round(by_service.get(svc, 0.0) + _f(amt), 6)
     top_services = sorted(by_service.items(), key=lambda kv: kv[1], reverse=True)[:10]
 
     # Chronological daily series for sparkline trends (oldest -> newest)
     chronological = sorted(rows, key=lambda r: r["date"])
     gross_trend = [round(r["gross_usd"], 4) for r in chronological]
+
+    top_applications = sorted(by_application.items(), key=lambda kv: kv[1]["gross_usd"], reverse=True)
+    top_applications_data = [
+        {
+            "application_name": app_n,
+            "gross_usd": round(info["gross_usd"], 4),
+            "net_usd": round(info["net_usd"], 4),
+            "resource_count": info["resource_count"],
+            "percent": round((info["gross_usd"] / window_gross * 100), 1) if window_gross > 0 else 100.0,
+            "trend": [
+                round(_f((r.get("applications") or {}).get(app_n, r["gross_usd"] if r.get("application_name") == app_n else 0.0)), 6)
+                for r in chronological
+            ],
+        }
+        for app_n, info in top_applications
+    ]
+
     top_services_data = [
         {
             "service": s,
@@ -394,8 +476,10 @@ def _fetch_costs() -> dict:
         "currency": rows[0]["currency"] if rows else "USD",
         "credit": credit,
         "resource_count": resource_count,
+        "resources_by_application": resources_by_app,
         "daily": rows,
         "gross_trend": gross_trend,
+        "top_applications": top_applications_data,
         "top_services": top_services_data,
         "latency_breakdown": tracker.summary(),
     }
@@ -434,7 +518,25 @@ def lambda_handler(event, context=None):
         return _json(500, {"error": "internal error", "detail": str(exc)})
 
 
+DEFAULT_DEMO_URL = "https://2c5gs4u2lsxjzi66dbxbr7iuzu0xhila.lambda-url.us-east-2.on.aws/"
+DEFAULT_COST_URL = "https://ya5ufkitx2trpenhiv2ovdyh2m0icdep.lambda-url.us-east-2.on.aws/"
+DEFAULT_CDC_URL = "https://yotx3a4kegmhrtnxf3fmtilbym0kybbx.lambda-url.us-east-2.on.aws/"
+
+
 def _render(data: dict) -> str:
+    demo_url = (os.environ.get("DEMO_URL") or os.environ.get("WEB_DEMO_URL") or DEFAULT_DEMO_URL).strip()
+    cost_url = (os.environ.get("COST_WEB_URL") or DEFAULT_COST_URL).strip()
+    cdc_url = (os.environ.get("CDC_READER_URL") or os.environ.get("DUCKDB_READER_URL") or DEFAULT_CDC_URL).strip()
+
+    nav_html = (
+        '<nav class="nav-bar">'
+        f'<a href="{demo_url}" class="nav-link">Reality Check — live demo</a>'
+        '<span class="nav-sep">·</span>'
+        f'<a href="{cost_url}" class="nav-link active" aria-current="page">Reality Check — Cloud cost</a>'
+        '<span class="nav-sep">·</span>'
+        f'<a href="{cdc_url}" class="nav-link">DuckDB Serverless Analytics Reader</a>'
+        '</nav>'
+    )
     def esc(s):
         return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
@@ -444,8 +546,26 @@ def _render(data: dict) -> str:
         g = r.get("gross_usd", 0.0)
         return round((g / max_daily_gross * 100), 1) if max_daily_gross > 0 else 0
 
+    app_rows = "".join(
+        f"<tr><td><span style='display:inline-flex; align-items:center; gap:6px; font-weight:600; color:var(--fg)'>"
+        f"<span style='color:var(--accent)'>🏷️</span> {esc(a['application_name'])}</span></td>"
+        f"<td style='text-align:center'><span style='padding:2px 8px; border-radius:999px; font-size:11px; background:rgba(88,166,255,0.12); color:var(--accent); font-weight:600'>{esc(a.get('resource_count', 0))} resources</span></td>"
+        f"<td style='text-align:center'>{_sparkline_svg(a.get('trend', []))}</td>"
+        f"<td class='num'>${a['gross_usd']:.4f}</td>"
+        f"<td>"
+        f"<div style='display:flex; align-items:center; gap:8px'>"
+        f"<div style='flex:1; background:#21262d; border-radius:3px; height:6px; overflow:hidden'>"
+        f"<div style='width:{min(100, a.get('percent', 100))}%; background:var(--green); height:6px'></div>"
+        f"</div>"
+        f"<span style='font-size:11px; width:42px; text-align:right' class='num muted'>{a.get('percent', 100):.1f}%</span>"
+        f"</div>"
+        f"</td></tr>"
+        for a in data.get("top_applications", [])
+    ) or "<tr><td colspan='5' class='muted'>No application tagged spend in this window.</td></tr>"
+
     rows = "".join(
         f"<tr><td>{esc(r['date'])}</td>"
+        f"<td><span style='font-size:12px; font-weight:500; color:var(--accent); background:rgba(88,166,255,0.1); padding:2px 6px; border-radius:4px'>{esc(r.get('application_name', 'RealityChecker'))}</span></td>"
         f"<td class='num'>"
         f"<div style='display:inline-flex; align-items:center; justify-content:flex-end; gap:8px; width:100%'>"
         f"<div style='flex:1; max-width:70px; background:#21262d; border-radius:3px; height:6px; overflow:hidden'>"
@@ -456,7 +576,7 @@ def _render(data: dict) -> str:
         f"</td>"
         f"<td class='num'>${r['net_usd']:.4f}</td></tr>"
         for r in data.get("daily", [])
-    ) or "<tr><td colspan='3' class='muted'>No cost data recorded yet.</td></tr>"
+    ) or "<tr><td colspan='4' class='muted'>No cost data recorded yet.</td></tr>"
 
     svc_rows = "".join(
         f"<tr><td>{esc(s['service'])}</td>"
@@ -663,15 +783,21 @@ def _render(data: dict) -> str:
   .num {{ text-align:right; font-variant-numeric:tabular-nums; }}
   .muted {{ color:var(--muted); }}
   .foot {{ color:var(--muted); font-size:12px; margin:30px 0 60px; }}
+  .nav-bar {{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:10px 0 16px; margin-bottom:12px; border-bottom:1px solid var(--line); font-size:13px; }}
+  .nav-link {{ color:var(--muted); text-decoration:none; padding:4px 10px; border-radius:6px; transition:all .15s ease; }}
+  .nav-link:hover {{ color:var(--fg); background:rgba(110,118,129,.15); }}
+  .nav-link.active {{ color:var(--fg); font-weight:600; background:rgba(88,166,255,.15); border:1px solid rgba(88,166,255,.4); }}
+  .nav-sep {{ color:var(--line); }}
 </style></head>
 <body>
 <header>
+  {nav_html}
   <h1>Reality Check <span class="muted">— Cloud cost</span></h1>
   <p class="tag">Holistic AWS spend for this demo account, collected twice daily
   and stored in Aurora Serverless v2 (PostgreSQL). <b>Gross</b> is the real
   pre-credit consumption; <b>net</b> is what's actually billed after promotional
   credits (≈$0 while credits last).</p>
-  <p class="muted"><a href="/">&larr; Back to the contract-review demo</a></p>
+  <p class="muted"><a href="{demo_url}">&larr; Back to the contract-review demo</a></p>
 </header>
 <main>
   <div class="cards">
@@ -690,12 +816,22 @@ def _render(data: dict) -> str:
       <div class="muted" style="font-size:12px;margin-top:6px">{esc(data['days_recorded'])} days recorded</div></div>
   </div>
 
+  <h3>Breakdown by ApplicationName tag ({esc(data['window_days'])}-day roll-up, gross)</h3>
+  <table><thead><tr>
+    <th>ApplicationName</th>
+    <th style="text-align:center">Active Resources</th>
+    <th style="width:110px; text-align:center">Trend ({esc(data['window_days'])}d)</th>
+    <th class="num">Gross usage</th>
+    <th style="width:140px">Share</th>
+  </tr></thead>
+  <tbody>{app_rows}</tbody></table>
+
   <h3>Top services ({esc(data['window_days'])}-day roll-up, gross)</h3>
   <table><thead><tr><th>Service</th><th style="width:110px; text-align:center">Trend ({esc(data['window_days'])}d)</th><th class="num">Gross usage</th></tr></thead>
   <tbody>{svc_rows}</tbody></table>
 
   <h3>Daily history</h3>
-  <table><thead><tr><th>Date (UTC)</th><th class="num">Gross</th>
+  <table><thead><tr><th>Date (UTC)</th><th>ApplicationName</th><th class="num">Gross</th>
   <th class="num">Net</th></tr></thead><tbody>{rows}</tbody></table>
 
   {breakdown_html}

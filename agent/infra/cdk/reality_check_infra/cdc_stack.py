@@ -49,6 +49,8 @@ class CdcStack(Stack):
         db_iam_user: str = "cdc_sync_worker",
         db_port: int = 5432,
         sync_schedule_minutes: int = 5,
+        demo_url: str = "",
+        cost_web_url: str = "",
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -105,7 +107,7 @@ class CdcStack(Stack):
             "AWS_REGION_NAME": self.region,
             "REPLICATION_SLOT": "duckdb_cdc_slot",
             "PUBLICATION_NAME": "duckdb_pub",
-            "REPLICATED_TABLES": "daily_cost",
+            "REPLICATED_TABLES": "daily_cost,resource_inventory",
             "EMIT_METRICS": "true",
             "CDC_METRIC_NAMESPACE": "RealityCheckCDC",
         }
@@ -195,6 +197,8 @@ class CdcStack(Stack):
             "LOCAL_ETAG_PATH": "/tmp/analytics.etag",
             "EMIT_METRICS": "true",
             "CDC_METRIC_NAMESPACE": "RealityCheckCDC",
+            "DEMO_URL": demo_url,
+            "COST_WEB_URL": cost_web_url,
         }
 
         reader = lambda_.Function(

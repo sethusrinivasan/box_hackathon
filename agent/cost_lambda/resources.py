@@ -24,6 +24,7 @@ history across runs even for resources whose creation time AWS does not expose.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 import os
 import re
@@ -55,11 +56,23 @@ def _tagging_sweep(client) -> dict[str, dict]:
         for item in page.get("ResourceTagMappingList", []):
             arn = item["ResourceARN"]
             service, rtype = _service_and_type(arn)
+            tags_list = item.get("Tags", [])
+            tags_map = {t.get("Key"): t.get("Value") for t in tags_list if "Key" in t}
+            app_name = tags_map.get("ApplicationName")
+            if not app_name:
+                for k, v in tags_map.items():
+                    if k and k.lower() == "applicationname":
+                        app_name = v
+                        break
+            if not app_name:
+                app_name = "RealityChecker"
             found[arn] = {
                 "arn": arn,
                 "service": service,
                 "resource_type": rtype,
                 "region": REGION,
+                "application_name": app_name,
+                "tags": json.dumps(tags_map),
                 "created_at": None,  # filled by describers where available
             }
     return found
@@ -100,6 +113,8 @@ def _enrich_rds(records: dict[str, dict]) -> None:
                     records.setdefault(arn, {
                         "arn": arn, "service": "rds",
                         "resource_type": "cluster", "region": REGION,
+                        "application_name": "RealityChecker",
+                        "tags": json.dumps({"ApplicationName": "RealityChecker"}),
                     })
                     records[arn]["created_at"] = _iso(c.get("ClusterCreateTime"))
         for page in client.get_paginator("describe_db_instances").paginate():
@@ -109,6 +124,8 @@ def _enrich_rds(records: dict[str, dict]) -> None:
                     records.setdefault(arn, {
                         "arn": arn, "service": "rds",
                         "resource_type": "instance", "region": REGION,
+                        "application_name": "RealityChecker",
+                        "tags": json.dumps({"ApplicationName": "RealityChecker"}),
                     })
                     records[arn]["created_at"] = _iso(i.get("InstanceCreateTime"))
     except Exception as exc:

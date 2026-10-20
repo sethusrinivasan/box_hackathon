@@ -67,6 +67,8 @@ class CostTrackerStack(Stack):
         db_name: str = DB_NAME,
         db_iam_user: str = DB_IAM_USER,
         db_reader_user: str = DB_READER_USER,
+        demo_url: str = "",
+        cdc_reader_url: str = "",
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -262,6 +264,8 @@ class CostTrackerStack(Stack):
                 "AWS_REGION_NAME": self.region,
                 "COST_WINDOW_DAYS": "30",
                 "EMIT_METRICS": "true",   # DB connect latency / cold-resume metrics
+                "DEMO_URL": demo_url,
+                "CDC_READER_URL": cdc_reader_url,
             },
             description="Public Cloud-cost web view (read-only, IAM-auth, native PG).",
         )

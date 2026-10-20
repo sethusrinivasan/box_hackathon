@@ -74,6 +74,12 @@ def test_landing_page():
     r = web.lambda_handler(_ev("GET", "/"))
     assert r["statusCode"] == 200 and "text/html" in r["headers"]["content-type"]
     assert "Reality Check" in r["body"]
+    assert "Reality Check — live demo" in r["body"]
+    assert "Reality Check — Cloud cost" in r["body"]
+    assert "DuckDB Serverless Analytics Reader" in r["body"]
+    assert "nav-bar" in r["body"]
+    assert web.DEFAULT_COST_URL in r["body"]
+    assert web.DEFAULT_CDC_URL in r["body"]
 
 
 def test_healthz():

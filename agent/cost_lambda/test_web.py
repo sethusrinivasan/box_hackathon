@@ -90,7 +90,8 @@ def test_render_includes_latency_breakdown():
             "projection": {"binding_limit": "expiry", "days_until_expiry": 100, "avg_daily_gross_usd": 1.25},
         },
         "resource_count": 15,
-        "daily": [{"date": "2026-10-18", "gross_usd": 1.25, "net_usd": 0.0, "currency": "USD", "services": {}}],
+        "daily": [{"date": "2026-10-18", "application_name": "RealityChecker", "gross_usd": 1.25, "net_usd": 0.0, "currency": "USD", "services": {}}],
+        "top_applications": [{"application_name": "RealityChecker", "gross_usd": 1.25, "net_usd": 0.0, "resource_count": 15, "percent": 100.0, "trend": [1.25]}],
         "top_services": [{"service": "Amazon Relational Database Service", "usd": 1.0}],
         "latency_breakdown": {
             "total_ms": 150.5,
@@ -125,6 +126,8 @@ def test_render_includes_latency_breakdown():
     }
 
     html = web._render(mock_data)
+    assert "Breakdown by ApplicationName tag" in html
+    assert "RealityChecker" in html
     assert "AWS Service &amp; Aurora Latency Breakdown" in html
     assert "Aurora Serverless v2 (Warm) · TLSv1.3" in html
     assert "150.5 ms" in html
@@ -135,6 +138,12 @@ def test_render_includes_latency_breakdown():
     assert "psycopg:connect (TLS + IAM auth)" in html
     assert "120.0 ms" in html
     assert "85.7%" in html
+    assert "Reality Check — live demo" in html
+    assert "Reality Check — Cloud cost" in html
+    assert "DuckDB Serverless Analytics Reader" in html
+    assert "nav-bar" in html
+    assert web.DEFAULT_DEMO_URL in html
+    assert web.DEFAULT_CDC_URL in html
 
     # Test rendering with attempts comparison card
     mock_data["latency_breakdown"]["attempts"] = {
@@ -204,6 +213,10 @@ def test_fetch_costs_mocked():
         assert data["gross_trend"] == [0.5]
         assert len(data["top_services"]) == 1
         assert data["top_services"][0]["trend"] == [0.5]
+        assert "top_applications" in data
+        assert len(data["top_applications"]) == 1
+        assert data["top_applications"][0]["application_name"] == "RealityChecker"
+        assert data["top_applications"][0]["gross_usd"] == 0.5
 
 
 def test_fetch_costs_cold_resume_runs_twice_and_probes_warm():

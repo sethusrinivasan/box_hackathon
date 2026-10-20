@@ -486,6 +486,9 @@ class TestDuckDbReader(unittest.TestCase):
             self.assertIn("daily_cost: <strong>25</strong> records", res["body"])
             self.assertIn("Query Plan (EXPLAIN)", res["body"])
             self.assertIn("/mcp", res["body"])
+            self.assertIn("Reality Check — live demo", res["body"])
+            self.assertIn("Reality Check — Cloud cost", res["body"])
+            self.assertIn("nav-bar", res["body"])
 
     def test_reader_api_query_post_and_healthz(self):
         from agent.cdc.reader import lambda_handler

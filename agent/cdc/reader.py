@@ -257,7 +257,7 @@ def lambda_handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]
 
     # 3. Query execution (POST /api/query or POST / or direct invoke with {"query": "..."})
     if method == "POST" or (isinstance(event, dict) and "query" in event and not event.get("rawPath")):
-        query_sql = "SELECT * FROM daily_cost ORDER BY usage_date DESC LIMIT 10;"
+        query_sql = "SELECT usage_date, application_name, gross_usd, net_usd FROM daily_cost ORDER BY usage_date DESC LIMIT 10;"
         params: list[Any] = []
         explain = True
 
@@ -292,12 +292,30 @@ def lambda_handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]
     return _json_response(404, {"error": f"Not found: {method} {path}"})
 
 
+DEFAULT_DEMO_URL = "https://2c5gs4u2lsxjzi66dbxbr7iuzu0xhila.lambda-url.us-east-2.on.aws/"
+DEFAULT_COST_URL = "https://ya5ufkitx2trpenhiv2ovdyh2m0icdep.lambda-url.us-east-2.on.aws/"
+DEFAULT_CDC_URL = "https://yotx3a4kegmhrtnxf3fmtilbym0kybbx.lambda-url.us-east-2.on.aws/"
+
+
 def _render_query_editor_html(
     watermark: dict[str, Any],
     table_counts: dict[str, int] | None = None,
     base_url: str = "",
 ) -> str:
     """Render modern dark-themed interactive DuckDB query editor HTML."""
+    demo_url = (os.environ.get("DEMO_URL") or os.environ.get("WEB_DEMO_URL") or DEFAULT_DEMO_URL).strip()
+    cost_url = (os.environ.get("COST_WEB_URL") or DEFAULT_COST_URL).strip()
+    cdc_url = (base_url or os.environ.get("CDC_READER_URL") or os.environ.get("DUCKDB_READER_URL") or DEFAULT_CDC_URL).strip()
+
+    nav_html = (
+        '<nav class="nav-bar">'
+        f'<a href="{demo_url}" class="nav-link">Reality Check — live demo</a>'
+        '<span class="nav-sep">·</span>'
+        f'<a href="{cost_url}" class="nav-link">Reality Check — Cloud cost</a>'
+        '<span class="nav-sep">·</span>'
+        f'<a href="{cdc_url}" class="nav-link active" aria-current="page">DuckDB Serverless Analytics Reader</a>'
+        '</nav>'
+    )
     last_lsn = html.escape(str(watermark.get("last_applied_lsn", "None")))
     last_commit = html.escape(str(watermark.get("last_commit_timestamp", "None")))
     sync_mode = html.escape(str(watermark.get("sync_mode", "UNKNOWN")))
@@ -660,10 +678,16 @@ def _render_query_editor_html(
     .arch-card strong {{
       color: var(--fg);
     }}
+    .nav-bar {{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:10px 0 16px; margin-bottom:16px; border-bottom:1px solid var(--line); font-size:13px; }}
+    .nav-link {{ color:var(--muted); text-decoration:none; padding:4px 10px; border-radius:6px; transition:all .15s ease; }}
+    .nav-link:hover {{ color:var(--fg); background:rgba(110,118,129,.15); }}
+    .nav-link.active {{ color:var(--fg); font-weight:600; background:rgba(88,166,255,.15); border:1px solid rgba(88,166,255,.4); }}
+    .nav-sep {{ color:var(--line); }}
   </style>
 </head>
 <body>
   <div class="container">
+    {nav_html}
     <header>
       <div class="title-group">
         <h1><span>🦆</span> DuckDB Serverless Analytics Reader</h1>
@@ -685,14 +709,20 @@ def _render_query_editor_html(
         </div>
       </div>
       <div class="templates-grid">
-        <button class="template-btn" onclick="setQuery(this)" data-sql="SELECT usage_date, gross_usd, net_usd FROM daily_cost ORDER BY usage_date DESC LIMIT 15;">
+        <button class="template-btn" onclick="setQuery(this)" data-sql="SELECT usage_date, application_name, gross_usd, net_usd FROM daily_cost ORDER BY usage_date DESC LIMIT 15;">
           📊 Recent Costs <span class="badge-count">daily_cost: {daily_cost_count} rows</span>
         </button>
-        <button class="template-btn" onclick="setQuery(this)" data-sql="SELECT count(*) as total_days, round(sum(gross_usd), 2) as total_gross_usd, round(avg(gross_usd), 2) as avg_daily_usd, min(usage_date) as start_date, max(usage_date) as latest_date FROM daily_cost;">
-          📈 Spend Aggregations
+        <button class="template-btn" onclick="setQuery(this)" data-sql="SELECT application_name, count(*) as total_days, round(sum(gross_usd), 2) as total_gross_usd, round(avg(gross_usd), 2) as avg_daily_usd, min(usage_date) as start_date, max(usage_date) as latest_date FROM daily_cost GROUP BY application_name;">
+          📈 Spend by Application
+        </button>
+        <button class="template-btn" onclick="setQuery(this)" data-sql="SELECT application_name, round(sum(gross_usd), 4) as total_gross_usd, round(sum(net_usd), 4) as total_net_usd FROM daily_cost GROUP BY application_name;">
+          🏷️ Application Breakdown
+        </button>
+        <button class="template-btn" onclick="setQuery(this)" data-sql="SELECT application_name, service, count(*) as resource_count FROM resource_inventory GROUP BY application_name, service ORDER BY resource_count DESC;">
+          📦 Resources by App
         </button>
         <button class="template-btn" onclick="setQuery(this)" data-sql="SHOW TABLES;">
-          🏷️ Show Tables <span class="badge-count">{len(counts)} tables</span>
+          📋 Show Tables <span class="badge-count">{len(counts)} tables</span>
         </button>
         <button class="template-btn" onclick="setQuery(this)" data-sql="SELECT * FROM __cdc_metadata;">
           ⏱️ CDC Watermarks
@@ -709,7 +739,7 @@ def _render_query_editor_html(
         <span>Ctrl + Enter to run</span>
       </div>
       <div class="editor-body">
-        <textarea id="sql-input" class="sql-input" spellcheck="false">SELECT usage_date, gross_usd, net_usd FROM daily_cost ORDER BY usage_date DESC LIMIT 15;</textarea>
+        <textarea id="sql-input" class="sql-input" spellcheck="false">SELECT usage_date, application_name, gross_usd, net_usd FROM daily_cost ORDER BY usage_date DESC LIMIT 15;</textarea>
       </div>
       <div class="editor-footer">
         <span class="stats-pill" id="cache-indicator">Cache status: Evaluating S3 ETag</span>

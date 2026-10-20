@@ -43,6 +43,7 @@ except ImportError:
     CdcStack = None
 
 app = cdk.App()
+cdk.Tags.of(app).add("ApplicationName", "RealityChecker")
 
 function_name = app.node.try_get_context("functionName") or "reality-check-web-demo"
 dashboard_name = app.node.try_get_context("dashboardName") or "RealityCheck"
@@ -50,11 +51,18 @@ alarm_email = app.node.try_get_context("alarmEmail")  # optional
 web_concurrency = int(app.node.try_get_context("webConcurrency") or 5)
 # Optional: URL of the Cloud-cost web view (CostWebUrl output of the cost-tracker
 # stack). When provided, the demo page shows a "Cloud cost" link.
-cost_web_url = app.node.try_get_context("costWebUrl") or ""
+cost_web_url = (app.node.try_get_context("costWebUrl")
+                or os.environ.get("COST_WEB_URL")
+                or "https://ya5ufkitx2trpenhiv2ovdyh2m0icdep.lambda-url.us-east-2.on.aws/")
 # Live demo URL the hourly canary probes. Defaults to the deployed Function URL;
 # override with -c demoUrl=... for a different deployment.
 demo_url = (app.node.try_get_context("demoUrl")
+            or os.environ.get("DEMO_URL")
             or "https://2c5gs4u2lsxjzi66dbxbr7iuzu0xhila.lambda-url.us-east-2.on.aws/")
+# Optional: URL of the DuckDB Serverless Analytics Reader web view.
+cdc_reader_url = (app.node.try_get_context("cdcReaderUrl")
+                  or os.environ.get("CDC_READER_URL")
+                  or "https://yotx3a4kegmhrtnxf3fmtilbym0kybbx.lambda-url.us-east-2.on.aws/")
 
 env = cdk.Environment(
     account=os.environ.get("CDK_DEFAULT_ACCOUNT"),
@@ -73,6 +81,8 @@ WebDemoStack(
     function_name=function_name,
     reserved_concurrency=web_concurrency,
     cost_web_url=cost_web_url,
+    cdc_reader_url=cdc_reader_url,
+    demo_url=demo_url,
     env=env,
     description="Reality Check public web demo: Lambda Function URL (no auth, offline).",
 )
@@ -105,6 +115,8 @@ if CostTrackerStack is not None:
     CostTrackerStack(
         app,
         "RealityCheckCostTracker",
+        demo_url=demo_url,
+        cdc_reader_url=cdc_reader_url,
         env=env,
         description=("Reality Check daily cost tracker: Aurora Serverless v2 "
                      "PostgreSQL 18 (min 0 ACU) + collector Lambda via IAM DB auth."),
@@ -117,6 +129,8 @@ if CdcStack is not None:
         cluster_endpoint="reality-check-cost-tracker.cluster-c52ymc6u0ruy.us-east-2.rds.amazonaws.com",
         cluster_resource_id="cluster-DJLU4ZBVHZ6HGQCZTXR7YKDQ7Q",
         db_iam_user="cdc_sync_worker",
+        demo_url=demo_url,
+        cost_web_url=cost_web_url,
         env=env,
         description="Reality Check serverless Aurora-to-DuckDB CDC pipeline via S3.",
     )

@@ -53,6 +53,7 @@ _LOG_EXPORTS = ["postgresql", "instance", "iam-db-auth-error"]
 # (ABAC) IAM on the management-plane actions (rds:ModifyDBCluster etc.), so the
 # provider role can only act on clusters that carry them.
 _TAGS = [
+    {"Key": "ApplicationName", "Value": "RealityChecker"},
     {"Key": "Project", "Value": "RealityCheck"},
     {"Key": "Component", "Value": "cost-tracker"},
     {"Key": "DataClassification", "Value": "cost-metrics"},

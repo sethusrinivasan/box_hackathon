@@ -80,6 +80,8 @@ class WebDemoStack(Stack):
         function_name: str = "reality-check-web-demo",
         reserved_concurrency: int = 5,
         cost_web_url: str = "",
+        cdc_reader_url: str = "",
+        demo_url: str = "",
         flag_param_name: str = "/reality-check/web-demo/evidence-store",
         **kwargs,
     ) -> None:
@@ -153,6 +155,9 @@ class WebDemoStack(Stack):
                 # When set, the demo page shows a "Cloud cost" link to the cost
                 # web view (RealityCheckCostTracker stack's CostWebUrl output).
                 "COST_WEB_URL": cost_web_url,
+                # When set, links to DuckDB Serverless Analytics Reader
+                "CDC_READER_URL": cdc_reader_url,
+                "DEMO_URL": demo_url,
                 # SSM-backed feature flag the demo page reads/flips (pgvector
                 # evidence retrieval on|off). Parameter name only — no secret.
                 "EVIDENCE_FLAG_PARAM": flag_param_name,

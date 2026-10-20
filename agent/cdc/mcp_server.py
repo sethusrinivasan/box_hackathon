@@ -65,7 +65,7 @@ class McpServer:
             if "text/html" in accept:
                 table_counts = self.reader.get_table_counts()
                 widget_html = self.render_widget_html(
-                    initial_query="SELECT usage_date, gross_usd, net_usd FROM daily_cost ORDER BY usage_date DESC LIMIT 15;",
+                    initial_query="SELECT usage_date, application_name, gross_usd, net_usd FROM daily_cost ORDER BY usage_date DESC LIMIT 15;",
                     table_counts=table_counts,
                 )
                 return {
@@ -453,7 +453,7 @@ class McpServer:
         if uri == UI_RESOURCE_URI:
             table_counts = self.reader.get_table_counts()
             widget_html = self.render_widget_html(
-                initial_query="SELECT usage_date, gross_usd, net_usd FROM daily_cost ORDER BY usage_date DESC LIMIT 15;",
+                initial_query="SELECT usage_date, application_name, gross_usd, net_usd FROM daily_cost ORDER BY usage_date DESC LIMIT 15;",
                 table_counts=table_counts,
             )
             return {
@@ -541,7 +541,7 @@ class McpServer:
 
         if name == "analyze_cloud_spend":
             days = args.get("days", "30")
-            sql = f"SELECT usage_date, gross_usd, net_usd FROM daily_cost WHERE usage_date >= CURRENT_DATE - INTERVAL '{days} days' ORDER BY usage_date DESC;"
+            sql = f"SELECT usage_date, application_name, gross_usd, net_usd FROM daily_cost WHERE usage_date >= CURRENT_DATE - INTERVAL '{days} days' ORDER BY usage_date DESC;"
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -552,7 +552,7 @@ class McpServer:
                             "role": "user",
                             "content": {
                                 "type": "text",
-                                "text": f"Please run the query `{sql}` via query_duckdb and summarize cloud burn rate, trends, and anomalies.",
+                                "text": f"Please run the query `{sql}` via query_duckdb and summarize cloud burn rate, trends, and anomalies by ApplicationName.",
                             },
                         }
                     ],
@@ -592,7 +592,7 @@ class McpServer:
 
     def render_widget_html(
         self,
-        initial_query: str = "SELECT usage_date, gross_usd, net_usd FROM daily_cost ORDER BY usage_date DESC LIMIT 15;",
+        initial_query: str = "SELECT usage_date, application_name, gross_usd, net_usd FROM daily_cost ORDER BY usage_date DESC LIMIT 15;",
         table_counts: dict[str, int] | None = None,
     ) -> str:
         """Render self-contained, responsive, sandboxed interactive UI widget for MCP Apps / AI chat."""
@@ -829,8 +829,9 @@ class McpServer:
     </div>
 
     <div class="quick-bar">
-      <button class="quick-btn" onclick="applySql(this)" data-sql="SELECT usage_date, gross_usd, net_usd FROM daily_cost ORDER BY usage_date DESC LIMIT 15;">📊 Recent Costs</button>
-      <button class="quick-btn" onclick="applySql(this)" data-sql="SELECT count(*) as days, round(sum(gross_usd),2) as total_usd, round(avg(gross_usd),2) as avg_usd FROM daily_cost;">📈 Spend Aggregations</button>
+      <button class="quick-btn" onclick="applySql(this)" data-sql="SELECT usage_date, application_name, gross_usd, net_usd FROM daily_cost ORDER BY usage_date DESC LIMIT 15;">📊 Recent Costs</button>
+      <button class="quick-btn" onclick="applySql(this)" data-sql="SELECT application_name, count(*) as days, round(sum(gross_usd),2) as total_usd, round(avg(gross_usd),2) as avg_usd FROM daily_cost GROUP BY application_name;">📈 Spend by Application</button>
+      <button class="quick-btn" onclick="applySql(this)" data-sql="SELECT application_name, service, count(*) as resources FROM resource_inventory GROUP BY application_name, service ORDER BY resources DESC;">📦 Resources by App</button>
       <button class="quick-btn" onclick="applySql(this)" data-sql="SHOW TABLES;">🏷️ Show Tables</button>
       <button class="quick-btn" onclick="applySql(this)" data-sql="SELECT * FROM __cdc_metadata;">⏱️ CDC Watermark</button>
     </div>

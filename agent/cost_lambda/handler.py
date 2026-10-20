@@ -79,20 +79,55 @@ def _gross_services(start: str, end: str) -> dict:
     }
 
 
+def _gross_applications(start: str, end: str) -> dict:
+    """Per-application GROSS spend for the day based on ApplicationName tag.
+    Groups by tag ApplicationName from Cost Explorer; falls back to attributing
+    all project gross spend to 'RealityChecker' if tags have not yet settled in CE."""
+    try:
+        res = _ce.get_cost_and_usage(
+            TimePeriod={"Start": start, "End": end},
+            Granularity="DAILY",
+            Metrics=["UnblendedCost"],
+            Filter={"Dimensions": {"Key": "RECORD_TYPE", "Values": ["Usage"]}},
+            GroupBy=[{"Type": "TAG", "Key": "ApplicationName"}],
+        )
+        groups = res.get("ResultsByTime", [{}])[0].get("Groups", [])
+        apps: dict[str, float] = {}
+        for g in groups:
+            raw_key = g["Keys"][0]
+            val = raw_key.split("$", 1)[1] if "$" in raw_key else raw_key
+            amt = round(float(g["Metrics"]["UnblendedCost"]["Amount"]), 6)
+            if amt != 0.0:
+                target_key = val if val else "RealityChecker"
+                apps[target_key] = round(apps.get(target_key, 0.0) + amt, 6)
+        return apps
+    except Exception as exc:
+        log.warning("Cost Explorer application tag group failed: %s", exc)
+        return {}
+
+
 def collect(avg_daily_gross: float, day: str | None = None) -> dict:
     """Holistic snapshot for a UTC day: gross/net/credit totals, per-service
     gross breakdown, and the credit balance + runway projection."""
     start, end = _day_window(day)
     bill = billing.harvest(start, end, avg_daily_gross)
     services = _gross_services(start, end)
+    applications = _gross_applications(start, end)
+    if not applications and services:
+        applications = {"RealityChecker": round(sum(services.values()), 6)}
+    elif "RealityChecker" not in applications and services:
+        applications["RealityChecker"] = round(sum(applications.values()) or sum(services.values()), 6)
+
     return {
         "usage_date": start,
+        "application_name": "RealityChecker",
         "gross": bill["day_gross_usd"],
         "credit": bill["day_credit_usd"],
         "net": bill["day_net_usd"],
         "net_unblended": bill["day_net_unblended_usd"],
         "currency": "USD",
         "services": services,                       # gross, per service
+        "applications": applications,               # gross, per ApplicationName tag
         "plan_type": bill["plan_type"],
         "credits_granted": bill["credits_granted_usd"],
         "credits_remaining": bill["credits_remaining_usd"],
@@ -158,16 +193,17 @@ def _connect() -> psycopg.Connection:
 
 _UPSERT_COST = """
 INSERT INTO daily_cost
-    (usage_date, unblended_usd, blended_usd, net_usd, currency, services,
-     gross_usd, credit_usd, gross_services, plan_type, credits_granted_usd,
-     credits_remaining_usd, credits_consumed_usd, credits_expiry, projection,
-     collected_at)
+    (usage_date, application_name, unblended_usd, blended_usd, net_usd, currency, services,
+     gross_usd, credit_usd, gross_services, applications, gross_applications, plan_type,
+     credits_granted_usd, credits_remaining_usd, credits_consumed_usd, credits_expiry,
+     projection, collected_at)
 VALUES
-    (%(usage_date)s, %(net)s, %(net)s, %(net)s, %(currency)s, %(services)s,
-     %(gross)s, %(credit)s, %(services)s, %(plan_type)s, %(credits_granted)s,
-     %(credits_remaining)s, %(credits_consumed)s, %(credits_expiry)s,
+    (%(usage_date)s, %(application_name)s, %(net)s, %(net)s, %(net)s, %(currency)s, %(services)s,
+     %(gross)s, %(credit)s, %(services)s, %(applications)s, %(applications)s, %(plan_type)s,
+     %(credits_granted)s, %(credits_remaining)s, %(credits_consumed)s, %(credits_expiry)s,
      %(projection)s, now())
 ON CONFLICT (usage_date) DO UPDATE SET
+    application_name      = EXCLUDED.application_name,
     unblended_usd         = EXCLUDED.unblended_usd,
     blended_usd           = EXCLUDED.blended_usd,
     net_usd               = EXCLUDED.net_usd,
@@ -176,6 +212,8 @@ ON CONFLICT (usage_date) DO UPDATE SET
     gross_usd             = EXCLUDED.gross_usd,
     credit_usd            = EXCLUDED.credit_usd,
     gross_services        = EXCLUDED.gross_services,
+    applications          = EXCLUDED.applications,
+    gross_applications    = EXCLUDED.gross_applications,
     plan_type             = EXCLUDED.plan_type,
     credits_granted_usd   = EXCLUDED.credits_granted_usd,
     credits_remaining_usd = EXCLUDED.credits_remaining_usd,
@@ -189,15 +227,17 @@ ON CONFLICT (usage_date) DO UPDATE SET
 # learned it this run. first_seen is preserved (set once on first insert).
 _UPSERT_RESOURCE = """
 INSERT INTO resource_inventory
-    (arn, service, resource_type, region, created_at, first_seen, last_seen)
+    (arn, service, resource_type, region, application_name, tags, created_at, first_seen, last_seen)
 VALUES
-    (%(arn)s, %(service)s, %(resource_type)s, %(region)s, %(created_at)s, now(), now())
+    (%(arn)s, %(service)s, %(resource_type)s, %(region)s, %(application_name)s, %(tags)s, %(created_at)s, now(), now())
 ON CONFLICT (arn) DO UPDATE SET
-    service       = EXCLUDED.service,
-    resource_type = EXCLUDED.resource_type,
-    region        = EXCLUDED.region,
-    created_at    = COALESCE(resource_inventory.created_at, EXCLUDED.created_at),
-    last_seen     = now();
+    service          = EXCLUDED.service,
+    resource_type    = EXCLUDED.resource_type,
+    region           = EXCLUDED.region,
+    application_name = EXCLUDED.application_name,
+    tags             = COALESCE(EXCLUDED.tags, resource_inventory.tags),
+    created_at       = COALESCE(resource_inventory.created_at, EXCLUDED.created_at),
+    last_seen        = now();
 """
 
 
@@ -224,6 +264,7 @@ def run(day: str | None = None) -> dict:
             snapshot = collect(avg, day)
             params = dict(snapshot)
             params["services"] = json.dumps(snapshot["services"])
+            params["applications"] = json.dumps(snapshot.get("applications", {"RealityChecker": snapshot["gross"]}))
             params["projection"] = json.dumps(snapshot["projection"])
             cur.execute(_UPSERT_COST, params)
             for r in inv:

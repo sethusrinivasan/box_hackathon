@@ -222,15 +222,31 @@ def _run_review(contract_key: str, *, live: bool = False) -> dict:
 # ---------------------------------------------------------------------------
 # HTTP layer (Lambda Function URL, payload format 2.0)
 # ---------------------------------------------------------------------------
+DEFAULT_DEMO_URL = "https://2c5gs4u2lsxjzi66dbxbr7iuzu0xhila.lambda-url.us-east-2.on.aws/"
+DEFAULT_COST_URL = "https://ya5ufkitx2trpenhiv2ovdyh2m0icdep.lambda-url.us-east-2.on.aws/"
+DEFAULT_CDC_URL = "https://yotx3a4kegmhrtnxf3fmtilbym0kybbx.lambda-url.us-east-2.on.aws/"
+
+
 def _page_html() -> str:
-    """Render the demo page, injecting the 'Cloud cost' link when the cost web
-    view URL is configured (env COST_WEB_URL set by deploy). If unset, the link
-    is omitted so the page still works standalone."""
-    cost_url = os.environ.get("COST_WEB_URL", "").strip()
-    link = (f'<a href="{cost_url}">Cloud cost &rarr;</a> '
-            "— holistic daily AWS spend for this demo account."
-            if cost_url else "")
-    return PAGE_HTML.replace("{{COST_LINK}}", link)
+    """Render the demo page, injecting the top navigation bar linking the three
+    Reality Check views, plus preserving {{COST_LINK}} for backward compatibility."""
+    cost_url = (os.environ.get("COST_WEB_URL") or DEFAULT_COST_URL).strip()
+    demo_url = (os.environ.get("DEMO_URL") or os.environ.get("WEB_DEMO_URL") or DEFAULT_DEMO_URL).strip()
+    cdc_url = (os.environ.get("CDC_READER_URL") or os.environ.get("DUCKDB_READER_URL") or DEFAULT_CDC_URL).strip()
+
+    nav_html = (
+        '<nav class="nav-bar">'
+        f'<a href="{demo_url}" class="nav-link active" aria-current="page">Reality Check — live demo</a>'
+        '<span class="nav-sep">·</span>'
+        f'<a href="{cost_url}" class="nav-link">Reality Check — Cloud cost</a>'
+        '<span class="nav-sep">·</span>'
+        f'<a href="{cdc_url}" class="nav-link">DuckDB Serverless Analytics Reader</a>'
+        '</nav>'
+    )
+    cost_link = (f'<a href="{cost_url}">Cloud cost &rarr;</a> '
+                 "— holistic daily AWS spend for this demo account."
+                 if cost_url else "")
+    return PAGE_HTML.replace("{{NAV_BAR}}", nav_html).replace("{{COST_LINK}}", cost_link)
 
 
 def _json(status, body):
@@ -516,10 +532,16 @@ PAGE_HTML = """<!doctype html>
   input:checked + .slider { background:var(--green); }
   input:checked + .slider:before { transform:translateX(20px); }
   input:disabled + .slider { opacity:.5; cursor:wait; }
+  .nav-bar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:10px 0 16px; margin-bottom:12px; border-bottom:1px solid var(--line); font-size:13px; }
+  .nav-link { color:var(--muted); text-decoration:none; padding:4px 10px; border-radius:6px; transition:all .15s ease; }
+  .nav-link:hover { color:var(--fg); background:rgba(110,118,129,.15); }
+  .nav-link.active { color:var(--fg); font-weight:600; background:rgba(88,166,255,.15); border:1px solid rgba(88,166,255,.4); }
+  .nav-sep { color:var(--line); }
 </style>
 </head>
 <body>
 <header>
+  {{NAV_BAR}}
   <h1>Reality Check <span class="muted">— live demo</span></h1>
   <p class="tag">Check a draft sales contract's claims against the company's evidence in Box, before you commit.</p>
   <p class="muted">The agent extracts every feature, delivery, and performance claim, checks each against
