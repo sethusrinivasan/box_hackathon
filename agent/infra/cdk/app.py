@@ -37,6 +37,11 @@ try:
 except ImportError:
     CostTrackerStack = None
 
+try:
+    from reality_check_infra.cdc_stack import CdcStack
+except ImportError:
+    CdcStack = None
+
 app = cdk.App()
 
 function_name = app.node.try_get_context("functionName") or "reality-check-web-demo"
@@ -103,6 +108,14 @@ if CostTrackerStack is not None:
         env=env,
         description=("Reality Check daily cost tracker: Aurora Serverless v2 "
                      "PostgreSQL 18 (min 0 ACU) + collector Lambda via IAM DB auth."),
+    )
+
+if CdcStack is not None:
+    CdcStack(
+        app,
+        "RealityCheckCdc",
+        env=env,
+        description="Reality Check serverless Aurora-to-DuckDB CDC pipeline via S3.",
     )
 
 app.synth()
