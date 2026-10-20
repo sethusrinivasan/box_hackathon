@@ -257,11 +257,11 @@ class CdcStack(Stack):
             alarm_name="RealityCheck-CDC-FullReInitSpike",
             metric=cw.Metric(
                 namespace="RealityCheckCDC",
-                metric_name="FullReInitCount",
+                metric_name="DataDiscrepancyDetected",
                 statistic="Sum",
                 period=Duration.hours(1),
             ),
-            threshold=2,  # Alert if >= 2 full re-inits occur in 1 hour
+            threshold=2,  # Alert if >= 2 data discrepancies or drift events occur in 1 hour
             evaluation_periods=1,
             datapoints_to_alarm=1,
             comparison_operator=cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,

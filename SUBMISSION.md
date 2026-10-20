@@ -11,6 +11,8 @@
 | **Project Name** | **Reality Check** |
 | **Tagline** | Ground draft sales contract commitments against verified Box evidence before you sign. |
 | **Live Web Demo** | [https://2c5gs4u2lsxjzi66dbxbr7iuzu0xhila.lambda-url.us-east-2.on.aws/](https://2c5gs4u2lsxjzi66dbxbr7iuzu0xhila.lambda-url.us-east-2.on.aws/) |
+| **Cloud Cost Dashboard** | [https://ya5ufkitx2trpenhiv2ovdyh2m0icdep.lambda-url.us-east-2.on.aws/](https://ya5ufkitx2trpenhiv2ovdyh2m0icdep.lambda-url.us-east-2.on.aws/) |
+| **DuckDB CDC Analytics** | [https://yotx3a4kegmhrtnxf3fmtilbym0kybbx.lambda-url.us-east-2.on.aws/](https://yotx3a4kegmhrtnxf3fmtilbym0kybbx.lambda-url.us-east-2.on.aws/) |
 | **Interactive Pitch Deck** | [https://sethusrinivasan.github.io/box_hackathon/](https://sethusrinivasan.github.io/box_hackathon/) (GitHub Pages) |
 | **Video Recording Script** | [`DEMO_SCRIPT.md`](./DEMO_SCRIPT.md) (Exact 3:00 timeline + Judge Q&A) |
 | **Pitch Deck Notes** | [`PRESENTATION.md`](./PRESENTATION.md) (6-slide executive deck) |
@@ -86,11 +88,12 @@ Stuffing an entire enterprise document library into an LLM context window is exp
 * Managed via a feature flag backed by **AWS Systems Manager (SSM) Parameter Store**, allowing instant runtime toggling without redeployment.
 
 ### C. Frugal, Serverless-First Infrastructure (Near-$0 Idle Cost)
-The entire solution is defined in **AWS CDK v2** across 4 modular stacks:
+The entire solution is defined in **AWS CDK v2** across 5 modular stacks:
 1. **`RealityCheckWebDemo`**: Public AWS-native web portal on an AWS Lambda Function URL backed by Amazon S3 (`contracts/`, `evidence/`, `reports/`) and live Bedrock reasoning. Features drag-and-drop contract PDF uploading, instant review execution, Graviton (arm64) runtime, reserved concurrency 5, and an **idle auto-shutdown** mechanism that parks the function after 3 days of zero traffic.
-2. **`RealityCheckObservability`**: Dedicated CloudWatch dashboard tracking request rates, p99 latencies, Bedrock costs, and synthetic canary health.
+2. **`RealityCheckObservability`**: Dedicated CloudWatch dashboard tracking request rates, p99 latencies, Bedrock costs, synthetic canary health, Aurora connections, and DuckDB CDC replication lag.
 3. **`RealityCheckCanary`**: Periodic automated synthetic health checks running against all endpoints.
-4. **`RealityCheckCostTracker`**: Daily holistic AWS cost collection via EventBridge Scheduler writing directly to **Aurora Serverless v2 PostgreSQL (express configuration, min 0 ACU)** using **IAM database authentication** (no stored passwords, no Secrets Manager fees).
+4. **`RealityCheckCostTracker`**: Daily holistic AWS cost collection via EventBridge Scheduler writing directly to **Aurora Serverless v2 PostgreSQL (express configuration, min 0 ACU)** using **IAM database authentication** (no stored passwords, no Secrets Manager fees). Includes full breakdown by `ApplicationName` resource tag.
+5. **`RealityCheckCdc`**: Serverless Aurora-to-DuckDB Change Data Capture (CDC) pipeline syncing cost and inventory tables to single-file DuckDB instances on S3 with DynamoDB distributed locking, sub-100ms analytical queries via Lambda Function URL, and native Model Context Protocol (MCP) tool support.
 
 ### D. Real-World Bedrock Economics
 * Cost per review on Amazon Nova Lite: **~$0.0003**

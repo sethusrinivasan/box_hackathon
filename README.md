@@ -180,10 +180,11 @@ agent/local_agent.py      the agent: chat loop, Box reads, review, comments, rep
 agent/web_handler.py      public offline web demo (Lambda Function URL)
 agent/cost_estimate.py    live-path Bedrock cost estimator (mock-only hosted demo)
 agent/cost_lambda/        daily holistic cost collector → Aurora (IAM-auth, native PG)
+agent/cdc/                serverless Aurora-to-DuckDB CDC replication, reader, & MCP server
 agent/check_config.py     preflight for Box + Bedrock
 agent/envload.py          .env loader
 agent/minipdf.py          dependency-free PDF writer (report + demo docs)
-agent/infra/cdk/          CDK: web demo, observability, and cost-tracker stacks
+agent/infra/cdk/          CDK: web demo, observability, canary, cost-tracker, & CDC stacks
 box/box_client.py         Box API wrapper (boxsdk v10, CCG)
 docs/contracts, evidence  demo docs (Markdown source)
 docs/box_upload/          the same docs as PDFs, ready to upload to Box
@@ -199,20 +200,28 @@ docs/presentation.html    interactive presentation web deck (standalone copy)
 
 ### Infrastructure & cost (frugal, serverless-first)
 
-Three CDK stacks (`agent/infra/cdk`), all tuned for near-zero idle cost:
+Five CDK stacks (`agent/infra/cdk`), all tuned for near-zero idle cost:
 
 - **RealityCheckWebDemo** — public AWS-native web portal on a Lambda Function URL
   with Amazon S3 storage (`contracts/`, `evidence/`, `reports/`) and live Bedrock
   reasoning. Graviton (arm64), 256 MB, drag-and-drop contract upload, 3-day logs,
   reserved concurrency 5, and an **idle auto-shutdown**
   (parks the function to $0 after 3 days with no invocations; manual re-enable).
-- **RealityCheckObservability** — CloudWatch dashboard + baseline alarms.
+- **RealityCheckObservability** — CloudWatch dashboard + baseline alarms across
+  request rates, Bedrock token costs, canary health, Aurora latencies, and DuckDB CDC lag.
+- **RealityCheckCanary** — automated synthetic canary runner executing regular health
+  probes against public endpoints and emitting EMF operational metrics.
 - **RealityCheckCostTracker** — daily holistic cost collection into **Aurora
   Serverless v2 PostgreSQL (express configuration)**: IAM-auth only, internet
   access gateway (no VPC, no NAT), single writer, min 0 ACU (auto-pause). A
   Graviton collector Lambda (outside any VPC) reads Cost Explorer and writes to
   Aurora over **native PostgreSQL** using an **IAM auth token** — no stored
   password, no Secrets Manager. Runs daily via EventBridge Scheduler.
+- **RealityCheckCdc** — serverless Aurora-to-DuckDB Change Data Capture (CDC) pipeline.
+  Syncs daily cost and resource inventory data into single-file DuckDB instances
+  in Amazon S3 with optimistic DynamoDB concurrency locks, sub-100ms analytical
+  queries on Lambda (`agent/cdc/reader.py`), and Model Context Protocol (MCP) tool
+  exposure for AI agents (`agent/cdc/mcp_server.py`).
 
 Foundational services only: IAM, KMS, S3, DynamoDB, Lambda, SQS, SNS, Aurora
 Serverless v2 Postgres. Cheapest viable model default (Amazon Nova Lite); the
