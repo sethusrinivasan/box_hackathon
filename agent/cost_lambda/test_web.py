@@ -103,6 +103,31 @@ def test_render_includes_latency_breakdown():
     assert "Aurora Serverless v2 (Warm)" in html
     assert "150.5 ms" in html
     assert "Amazon Aurora PostgreSQL" in html
+    assert "Trend (30d)" in html
+    assert "<svg" in html
+
+
+def test_sparkline_svg_rendering():
+    # Empty
+    assert "class=\"sparkline\"" in web._sparkline_svg([])
+
+    # Single point
+    single = web._sparkline_svg([0.05])
+    assert "<polyline" in single
+    assert "<circle" in single
+    assert "Latest: $0.0500" in single
+
+    # Rising spend (amber #d29922)
+    rising = web._sparkline_svg([0.01, 0.05])
+    assert "#d29922" in rising
+
+    # Declining spend (green #3fb950)
+    declining = web._sparkline_svg([0.05, 0.01])
+    assert "#3fb950" in declining
+
+    # Steady / baseline zero (blue #58a6ff)
+    steady = web._sparkline_svg([0.0, 0.0, 0.0])
+    assert "#58a6ff" in steady
 
 
 def test_fetch_costs_mocked():
@@ -133,6 +158,10 @@ def test_fetch_costs_mocked():
         assert data["window_gross_usd"] == 0.5
         assert "latency_breakdown" in data
         assert data["latency_breakdown"]["total_calls"] >= 2
+        assert "gross_trend" in data
+        assert data["gross_trend"] == [0.5]
+        assert len(data["top_services"]) == 1
+        assert data["top_services"][0]["trend"] == [0.5]
 
 
 def test_web_routes():
@@ -153,8 +182,10 @@ if __name__ == "__main__":
     print("PASS test_latency_tracker_cold_resume_flag")
     test_render_includes_latency_breakdown()
     print("PASS test_render_includes_latency_breakdown")
+    test_sparkline_svg_rendering()
+    print("PASS test_sparkline_svg_rendering")
     test_fetch_costs_mocked()
     print("PASS test_fetch_costs_mocked")
     test_web_routes()
     print("PASS test_web_routes")
-    print("\n5 passed, 0 failed")
+    print("\n6 passed, 0 failed")

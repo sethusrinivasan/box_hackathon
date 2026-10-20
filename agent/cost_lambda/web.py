@@ -88,6 +88,61 @@ def _fmt(v) -> str:
     return f"{float(v):.2f}" if v is not None else "—"
 
 
+def _sparkline_svg(
+    values: list[float],
+    width: int = 90,
+    height: int = 22,
+    color: str | None = None,
+) -> str:
+    """Render a lightweight inline SVG sparkline for a time series.
+
+    Values are expected in chronological order (oldest -> newest).
+    Color indicates trend unless explicitly provided:
+      - #d29922 (amber) if spend is trending upwards (>5% increase)
+      - #3fb950 (green) if spend is trending downwards (>5% decrease)
+      - #58a6ff (blue)  if spend is steady or baseline zero
+    """
+    if not values:
+        return f'<svg width="{width}" height="{height}" class="sparkline"></svg>'
+    pad_x, pad_y = 3, 3
+    n = len(values)
+    max_v = max(values) if values else 0.0
+    first_v = values[0] if values else 0.0
+    last_v = values[-1] if values else 0.0
+    if color is None:
+        if last_v > first_v * 1.05 and last_v > 0.001:
+            color = "#d29922"  # rising spend
+        elif last_v < first_v * 0.95 and first_v > 0.001:
+            color = "#3fb950"  # declining spend
+        else:
+            color = "#58a6ff"  # steady / normal
+    inner_w = width - 2 * pad_x
+    inner_h = height - 2 * pad_y
+    if n == 1:
+        y = (height - pad_y) - ((values[0] / max_v) * inner_h if max_v > 0 else 0)
+        pts = [(pad_x, round(y, 1)), (width - pad_x, round(y, 1))]
+    else:
+        pts = []
+        for i, v in enumerate(values):
+            x = pad_x + (inner_w * i / (n - 1))
+            y = (height - pad_y) - ((v / max_v) * inner_h if max_v > 0 else 0)
+            pts.append((round(x, 1), round(y, 1)))
+    poly_pts = " ".join(f"{x},{y}" for x, y in pts)
+    base_y = height - pad_y
+    area_pts = f"{pts[0][0]},{base_y} " + poly_pts + f" {pts[-1][0]},{base_y}"
+    last_x, last_y = pts[-1]
+    title = f"Latest: ${last_v:.4f} · Peak: ${max_v:.4f}"
+    return (
+        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+        f'style="vertical-align:middle; overflow:visible" aria-label="Trend sparkline">'
+        f'<title>{title}</title>'
+        f'<polygon points="{area_pts}" fill="{color}" fill-opacity="0.18" />'
+        f'<polyline points="{poly_pts}" fill="none" stroke="{color}" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" />'
+        f'<circle cx="{last_x}" cy="{last_y}" r="2.5" fill="{color}" />'
+        f"</svg>"
+    )
+
+
 def _fetch_costs() -> dict:
     cutoff = (dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=DAYS)).isoformat()
     rows = []
@@ -145,6 +200,19 @@ def _fetch_costs() -> dict:
         for svc, amt in r["services"].items():
             by_service[svc] = round(by_service.get(svc, 0.0) + float(amt), 6)
     top_services = sorted(by_service.items(), key=lambda kv: kv[1], reverse=True)[:10]
+
+    # Chronological daily series for sparkline trends (oldest -> newest)
+    chronological = sorted(rows, key=lambda r: r["date"])
+    gross_trend = [round(r["gross_usd"], 4) for r in chronological]
+    top_services_data = [
+        {
+            "service": s,
+            "usd": round(v, 4),
+            "trend": [round(float(r["services"].get(s, 0.0)), 6) for r in chronological],
+        }
+        for s, v in top_services
+    ]
+
     return {
         "window_days": DAYS,
         "days_recorded": len(rows),
@@ -154,7 +222,8 @@ def _fetch_costs() -> dict:
         "credit": credit,
         "resource_count": resource_count,
         "daily": rows,
-        "top_services": [{"service": s, "usd": round(v, 4)} for s, v in top_services],
+        "gross_trend": gross_trend,
+        "top_services": top_services_data,
         "latency_breakdown": tracker.summary(),
     }
 
@@ -196,17 +265,36 @@ def _render(data: dict) -> str:
     def esc(s):
         return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
+    max_daily_gross = max((r.get("gross_usd", 0.0) for r in data.get("daily", [])), default=0.0)
+
+    def _pct(r):
+        g = r.get("gross_usd", 0.0)
+        return round((g / max_daily_gross * 100), 1) if max_daily_gross > 0 else 0
+
     rows = "".join(
         f"<tr><td>{esc(r['date'])}</td>"
-        f"<td class='num'>${r['gross_usd']:.4f}</td>"
+        f"<td class='num'>"
+        f"<div style='display:inline-flex; align-items:center; justify-content:flex-end; gap:8px; width:100%'>"
+        f"<div style='flex:1; max-width:70px; background:#21262d; border-radius:3px; height:6px; overflow:hidden'>"
+        f"<div style='width:{_pct(r)}%; background:var(--accent); height:6px'></div>"
+        f"</div>"
+        f"<span>${r['gross_usd']:.4f}</span>"
+        f"</div>"
+        f"</td>"
         f"<td class='num'>${r['net_usd']:.4f}</td></tr>"
-        for r in data["daily"]
+        for r in data.get("daily", [])
     ) or "<tr><td colspan='3' class='muted'>No cost data recorded yet.</td></tr>"
 
     svc_rows = "".join(
-        f"<tr><td>{esc(s['service'])}</td><td class='num'>${s['usd']:.4f}</td></tr>"
-        for s in data["top_services"]
-    ) or "<tr><td colspan='2' class='muted'>No service spend in this window.</td></tr>"
+        f"<tr><td>{esc(s['service'])}</td>"
+        f"<td style='text-align:center'>{_sparkline_svg(s.get('trend', []))}</td>"
+        f"<td class='num'>${s['usd']:.4f}</td></tr>"
+        for s in data.get("top_services", [])
+    ) or "<tr><td colspan='3' class='muted'>No service spend in this window.</td></tr>"
+
+    chronological = sorted(data.get("daily", []), key=lambda r: r.get("date", ""))
+    gross_trend = data.get("gross_trend") or [r.get("gross_usd", 0.0) for r in chronological]
+    gross_sparkline = _sparkline_svg(gross_trend, width=110, height=26)
 
     b = data.get("latency_breakdown") or {}
     breakdown_html = ""
@@ -324,8 +412,13 @@ def _render(data: dict) -> str:
 </header>
 <main>
   <div class="cards">
-    <div class="card"><div class="muted">Last {esc(data['window_days'])} days (gross usage)</div>
-      <div class="big">${data['window_gross_usd']:.2f}</div></div>
+    <div class="card">
+      <div class="muted">Last {esc(data['window_days'])} days (gross usage)</div>
+      <div style="display:flex; justify-content:space-between; align-items:flex-end; margin-top:4px">
+        <div class="big">${data['window_gross_usd']:.2f}</div>
+        <div>{gross_sparkline}</div>
+      </div>
+    </div>
     <div class="card"><div class="muted">Last {esc(data['window_days'])} days (net, post-credit)</div>
       <div class="big">${data['window_net_usd']:.2f}</div></div>
     {credit_card}
@@ -335,7 +428,7 @@ def _render(data: dict) -> str:
   </div>
 
   <h3>Top services ({esc(data['window_days'])}-day roll-up, gross)</h3>
-  <table><thead><tr><th>Service</th><th class="num">Gross usage</th></tr></thead>
+  <table><thead><tr><th>Service</th><th style="width:110px; text-align:center">Trend ({esc(data['window_days'])}d)</th><th class="num">Gross usage</th></tr></thead>
   <tbody>{svc_rows}</tbody></table>
 
   <h3>Daily history</h3>
