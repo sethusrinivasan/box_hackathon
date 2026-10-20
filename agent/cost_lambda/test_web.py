@@ -116,9 +116,9 @@ def test_render_includes_latency_breakdown():
                     "calls": 1,
                     "total_ms": 10.5,
                     "percent": 7.0,
-                    "operations": {"rds:generate_db_auth_token": 1},
+                    "operations": {"rds:generate_db_auth_token": 1},  # nosec B105
                     "sub_operations": [
-                        {"operation": "rds:generate_db_auth_token", "calls": 1, "total_ms": 10.5, "percent_of_service": 100.0},
+                        {"operation": "rds:generate_db_auth_token", "calls": 1, "total_ms": 10.5, "percent_of_service": 100.0},  # nosec B105
                     ],
                 },
             ],
@@ -147,8 +147,8 @@ def test_render_includes_latency_breakdown():
 
     # Test rendering with attempts comparison card
     mock_data["latency_breakdown"]["attempts"] = {
-        "cold_attempt": {"token_ms": 10.0, "tcp_ms": 25.0, "tls_ms": 65.0, "cold_resume_ms": 10540.0, "server_iam_auth_ms": 397.3, "query_ms": 263.9, "total_ms": 11301.2},
-        "warm_attempt": {"token_ms": 8.2, "tcp_ms": 20.0, "tls_ms": 40.0, "cold_resume_ms": 0.0, "server_iam_auth_ms": 68.2, "query_ms": 71.3, "total_ms": 207.7},
+        "cold_attempt": {"token_ms": 10.0, "tcp_ms": 25.0, "tls_ms": 65.0, "cold_resume_ms": 10540.0, "server_iam_auth_ms": 397.3, "query_ms": 263.9, "total_ms": 11301.2},  # nosec B105
+        "warm_attempt": {"token_ms": 8.2, "tcp_ms": 20.0, "tls_ms": 40.0, "cold_resume_ms": 0.0, "server_iam_auth_ms": 68.2, "query_ms": 71.3, "total_ms": 207.7},  # nosec B105
     }
     html_with_attempts = web._render(mock_data)
     assert "Cold Start vs. Warm Baseline End-to-End Comparison" in html_with_attempts

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 import os
 import select
 import time
@@ -32,6 +33,8 @@ import certifi
 import psycopg
 
 from metrics import emit_metric, LatencyTracker
+
+logger = logging.getLogger("reality_check.cost_web")
 
 DB_HOST = os.environ["DB_HOST"]
 DB_PORT = int(os.environ.get("DB_PORT", "5432"))
@@ -374,7 +377,8 @@ def _fetch_costs() -> dict:
             token_probe = _rds.generate_db_auth_token(
                 DBHostname=DB_HOST, Port=DB_PORT, DBUsername=DB_IAM_USER, Region=REGION
             )
-            tracker.record("AWS RDS", "rds:generate_db_auth_token (warm probe)", (time.perf_counter() - t_probe) * 1000)
+            probe_token_ms = (time.perf_counter() - t_probe) * 1000
+            tracker.record("AWS RDS", "rds:generate_db_auth_token (warm probe)", probe_token_ms)
             probe_conninfo = (
                 f"host={DB_HOST} port={DB_PORT} dbname={DB_NAME} user={DB_IAM_USER} "
                 f"password={token_probe} sslmode=verify-full sslrootcert={certifi.where()} "
@@ -412,8 +416,8 @@ def _fetch_costs() -> dict:
             warm_att["total_ms"] = round(sum(v for k, v in warm_att.items() if k.endswith("_ms")), 1)
 
             tracker.record_attempts(cold_att, warm_att)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Warm baseline attempt probe skipped: %s", exc)
 
     window_gross = round(sum(r["gross_usd"] for r in rows), 4)
     window_net = round(sum(r["net_usd"] for r in rows), 4)

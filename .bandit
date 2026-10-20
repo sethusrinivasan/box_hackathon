@@ -1,10 +1,13 @@
 # Bandit configuration for Reality Check.
 # https://bandit.readthedocs.io/en/latest/config.html
 
-[bandit]
-# Exclude generated fixtures, the virtualenv, and runtime output dirs.
-exclude = /.venv,/data/contracts,/data/reports,/data/reviews
-
-# B101 (assert_used) fires on every assert in the test suites, which is the
-# correct and expected use of assert in tests — pure noise, so skip it.
-skips = B101
+skips: ['B101']
+exclude_dirs:
+  - '.venv'
+  - 'cdk.out'
+  - 'agent/infra/cdk/cdk.out'
+  - 'node_modules'
+  - 'agent/infra/cdk/node_modules'
+  - 'data/contracts'
+  - 'data/reports'
+  - 'data/reviews'

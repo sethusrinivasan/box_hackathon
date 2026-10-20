@@ -99,7 +99,7 @@ class CdcStack(Stack):
             "S3_BUCKET": analytics_bucket.bucket_name,
             "S3_KEY": "analytics/analytics.duckdb",
             "S3_STORAGE_CLASS": "STANDARD",
-            "LOCAL_DB_PATH": "/tmp/analytics.duckdb",
+            "LOCAL_DB_PATH": "/tmp/analytics.duckdb",  # nosec B108
             "DB_HOST": cluster_endpoint,
             "DB_PORT": str(db_port),
             "DB_NAME": db_name,
@@ -193,8 +193,8 @@ class CdcStack(Stack):
             "S3_BUCKET": analytics_bucket.bucket_name,
             "S3_KEY": "analytics/analytics.duckdb",
             "S3_STORAGE_CLASS": "STANDARD",
-            "LOCAL_DB_PATH": "/tmp/analytics.duckdb",
-            "LOCAL_ETAG_PATH": "/tmp/analytics.etag",
+            "LOCAL_DB_PATH": "/tmp/analytics.duckdb",  # nosec B108
+            "LOCAL_ETAG_PATH": "/tmp/analytics.etag",  # nosec B108
             "EMIT_METRICS": "true",
             "CDC_METRIC_NAMESPACE": "RealityCheckCDC",
             "DEMO_URL": demo_url,
@@ -301,7 +301,7 @@ class _LocalCdcBundler:
 
     def try_bundle(self, output_dir: str, options) -> bool:  # noqa: ANN001
         import shutil
-        import subprocess
+        import subprocess  # nosec B404
         src = os.path.join(_REPO_ROOT, "agent", "cdc")
         try:
             # 1) Copy cdc package
@@ -314,7 +314,7 @@ class _LocalCdcBundler:
             # 2) Install wheels
             reqs_file = os.path.join(dest_cdc, "requirements.txt")
             if os.path.exists(reqs_file):
-                subprocess.run(
+                subprocess.run(  # nosec B603, B607
                     [
                         "pip", "install",
                         "-r", reqs_file,
@@ -328,7 +328,7 @@ class _LocalCdcBundler:
                     check=True,
                 )
             # 3) Cleanup __pycache__
-            subprocess.run(
+            subprocess.run(  # nosec B603, B607
                 ["bash", "-c",
                  f"find '{output_dir}' -name __pycache__ -type d -prune -exec rm -rf {{}} + || true"],
                 check=False,

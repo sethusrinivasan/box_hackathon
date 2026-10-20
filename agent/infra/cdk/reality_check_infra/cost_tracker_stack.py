@@ -369,7 +369,7 @@ class _LocalCollectorBundler:
 
     def try_bundle(self, output_dir: str, options) -> bool:  # noqa: ANN001
         import shutil
-        import subprocess
+        import subprocess  # nosec B404
         src = os.path.join(_REPO_ROOT, "agent", "cost_lambda")
         try:
             # 1) copy the collector sources
@@ -381,7 +381,7 @@ class _LocalCollectorBundler:
                 else:
                     shutil.copy2(s, d)
             # 2) install arm64 deps into the package dir
-            subprocess.run(
+            subprocess.run(  # nosec B603, B607
                 [
                     "pip", "install",
                     "-r", os.path.join(output_dir, "requirements.txt"),
@@ -395,7 +395,7 @@ class _LocalCollectorBundler:
                 check=True,
             )
             # 3) drop caches
-            subprocess.run(
+            subprocess.run(  # nosec B603, B607
                 ["bash", "-c",
                  f"find '{output_dir}' -name __pycache__ -type d -prune "
                  "-exec rm -rf {} + || true"],

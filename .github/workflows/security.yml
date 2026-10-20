@@ -36,10 +36,9 @@ jobs:
 
       - name: Run Bandit
         # Do not fail the build on findings; surface them as SARIF alerts instead.
-        # Skips the generated PDF fixtures and virtualenv.
+        # Skips the generated PDF fixtures, CDK out, node_modules, and virtualenv via .bandit.
         run: |
-          bandit -r . \
-            -x ./.venv,./data/contracts,./data/reports,./data/reviews \
+          bandit -c .bandit -r . \
             -f sarif -o bandit.sarif || true
 
       - name: Upload Bandit SARIF

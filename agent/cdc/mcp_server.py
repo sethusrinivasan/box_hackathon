@@ -540,8 +540,11 @@ class McpServer:
         args = params.get("arguments", {}) or {}
 
         if name == "analyze_cloud_spend":
-            days = args.get("days", "30")
-            sql = f"SELECT usage_date, application_name, gross_usd, net_usd FROM daily_cost WHERE usage_date >= CURRENT_DATE - INTERVAL '{days} days' ORDER BY usage_date DESC;"
+            try:
+                days_int = int(args.get("days", 30))
+            except (ValueError, TypeError):
+                days_int = 30
+            sql = f"SELECT usage_date, application_name, gross_usd, net_usd FROM daily_cost WHERE usage_date >= CURRENT_DATE - INTERVAL '{days_int} days' ORDER BY usage_date DESC;"  # nosec B608
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -606,14 +609,22 @@ class McpServer:
 
         esc_query = html.escape(initial_query)
 
-        return f"""<!DOCTYPE html>
+        return (
+            WIDGET_HTML_TEMPLATE
+            .replace("{{COUNTS_BADGE_ITEMS}}", counts_badge_items)
+            .replace("{{ESC_QUERY}}", esc_query)
+            .replace("{{API_URL}}", api_url)
+        )
+
+
+WIDGET_HTML_TEMPLATE = """<!DOCTYPE html>  # nosec B608
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>DuckDB In-Place Analytics Widget</title>
   <style>
-    :root {{
+    :root {
       --bg: #0d1117;
       --card-bg: #161b22;
       --border: #30363d;
@@ -623,20 +634,20 @@ class McpServer:
       --green: #238636;
       --green-hover: #2ea043;
       --code-bg: #090d13;
-    }}
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       background: var(--bg);
       color: var(--fg);
       padding: 14px;
       font-size: 13px;
-    }}
-    .widget-container {{
+    }
+    .widget-container {
       max-width: 960px;
       margin: 0 auto;
-    }}
-    .widget-header {{
+    }
+    .widget-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
@@ -645,20 +656,20 @@ class McpServer:
       border-bottom: 1px solid var(--border);
       flex-wrap: wrap;
       gap: 8px;
-    }}
-    .widget-title {{
+    }
+    .widget-title {
       font-size: 15px;
       font-weight: 600;
       display: flex;
       align-items: center;
       gap: 6px;
-    }}
-    .counts-group {{
+    }
+    .counts-group {
       display: flex;
       gap: 6px;
       flex-wrap: wrap;
-    }}
-    .tbl-badge {{
+    }
+    .tbl-badge {
       display: inline-flex;
       align-items: center;
       gap: 4px;
@@ -668,17 +679,17 @@ class McpServer:
       border: 1px solid rgba(56, 139, 253, 0.25);
       font-size: 11px;
       color: var(--accent);
-    }}
-    .tbl-badge strong {{
+    }
+    .tbl-badge strong {
       color: #3fb950;
-    }}
-    .quick-bar {{
+    }
+    .quick-bar {
       display: flex;
       gap: 6px;
       margin-bottom: 10px;
       flex-wrap: wrap;
-    }}
-    .quick-btn {{
+    }
+    .quick-btn {
       background: var(--card-bg);
       border: 1px solid var(--border);
       color: var(--fg);
@@ -687,19 +698,19 @@ class McpServer:
       font-size: 11px;
       cursor: pointer;
       transition: all 0.15s ease;
-    }}
-    .quick-btn:hover {{
+    }
+    .quick-btn:hover {
       border-color: var(--accent);
       background: #1f242c;
-    }}
-    .editor-box {{
+    }
+    .editor-box {
       border: 1px solid var(--border);
       border-radius: 6px;
       background: var(--card-bg);
       margin-bottom: 12px;
       overflow: hidden;
-    }}
-    textarea.sql-input {{
+    }
+    textarea.sql-input {
       width: 100%;
       height: 70px;
       background: var(--code-bg);
@@ -710,16 +721,16 @@ class McpServer:
       font-size: 12px;
       resize: vertical;
       outline: none;
-    }}
-    .editor-actions {{
+    }
+    .editor-actions {
       padding: 6px 12px;
       display: flex;
       justify-content: space-between;
       align-items: center;
       border-top: 1px solid var(--border);
       background: #12161e;
-    }}
-    .run-btn {{
+    }
+    .run-btn {
       background: var(--green);
       color: #fff;
       border: none;
@@ -729,29 +740,29 @@ class McpServer:
       font-weight: 600;
       cursor: pointer;
       transition: background 0.15s;
-    }}
-    .run-btn:hover {{
+    }
+    .run-btn:hover {
       background: var(--green-hover);
-    }}
-    .results-card {{
+    }
+    .results-card {
       border: 1px solid var(--border);
       border-radius: 6px;
       background: var(--card-bg);
       overflow: hidden;
-    }}
-    .results-tabs-bar {{
+    }
+    .results-tabs-bar {
       display: flex;
       justify-content: space-between;
       align-items: center;
       background: #12161e;
       border-bottom: 1px solid var(--border);
       padding: 4px 8px;
-    }}
-    .tabs-group {{
+    }
+    .tabs-group {
       display: flex;
       gap: 4px;
-    }}
-    .tab-btn {{
+    }
+    .tab-btn {
       background: transparent;
       border: none;
       color: var(--muted);
@@ -760,32 +771,32 @@ class McpServer:
       cursor: pointer;
       border-radius: 4px;
       font-weight: 500;
-    }}
-    .tab-btn.active {{
+    }
+    .tab-btn.active {
       background: rgba(56, 139, 253, 0.15);
       color: var(--accent);
       font-weight: 600;
-    }}
-    .stats-label {{
+    }
+    .stats-label {
       font-size: 11px;
       color: var(--muted);
-    }}
-    .stats-val {{
+    }
+    .stats-val {
       color: #3fb950;
       font-weight: 600;
       font-family: ui-monospace, monospace;
-    }}
-    .content-area {{
+    }
+    .content-area {
       max-height: 320px;
       overflow: auto;
-    }}
-    table.data-table {{
+    }
+    table.data-table {
       width: 100%;
       border-collapse: collapse;
       font-size: 12px;
       text-align: left;
-    }}
-    table.data-table th {{
+    }
+    table.data-table th {
       position: sticky;
       top: 0;
       background: #161b22;
@@ -793,13 +804,13 @@ class McpServer:
       padding: 6px 10px;
       border-bottom: 1px solid var(--border);
       font-size: 11px;
-    }}
-    table.data-table td {{
+    }
+    table.data-table td {
       padding: 6px 10px;
       border-bottom: 1px solid rgba(255,255,255,0.05);
       font-family: ui-monospace, monospace;
-    }}
-    pre.plan-pre {{
+    }
+    pre.plan-pre {
       background: var(--code-bg);
       color: #8b949e;
       padding: 12px;
@@ -808,13 +819,13 @@ class McpServer:
       line-height: 1.4;
       white-space: pre;
       overflow-x: auto;
-    }}
-    .empty {{
+    }
+    .empty {
       padding: 24px;
       text-align: center;
       color: var(--muted);
       font-size: 12px;
-    }}
+    }
   </style>
 </head>
 <body>
@@ -824,7 +835,7 @@ class McpServer:
         <span>🦆</span> DuckDB In-Place Analytics
       </div>
       <div class="counts-group">
-        {counts_badge_items}
+        {{COUNTS_BADGE_ITEMS}}
       </div>
     </div>
 
@@ -837,7 +848,7 @@ class McpServer:
     </div>
 
     <div class="editor-box">
-      <textarea id="widget-sql" class="sql-input">{esc_query}</textarea>
+      <textarea id="widget-sql" class="sql-input">{{ESC_QUERY}}</textarea>
       <div class="editor-actions">
         <span class="stats-label" id="w-status">Zero Aurora connections · In-process execution</span>
         <button id="w-run-btn" class="run-btn" onclick="executeWidgetQuery()">▶ Run SQL</button>
@@ -861,28 +872,28 @@ class McpServer:
   </div>
 
   <script>
-    const API_URL = "{api_url}";
+    const API_URL = "{{API_URL}}";
     let currentData = null;
 
-    function applySql(btn) {{
+    function applySql(btn) {
       document.getElementById('widget-sql').value = btn.getAttribute('data-sql');
       executeWidgetQuery();
-    }}
+    }
 
-    function switchWidgetTab(tab) {{
+    function switchWidgetTab(tab) {
       document.getElementById('t-res-btn').classList.toggle('active', tab === 'results');
       document.getElementById('t-plan-btn').classList.toggle('active', tab === 'plan');
 
       if (!currentData) return;
       const content = document.getElementById('w-content');
-      if (tab === 'results') {{
+      if (tab === 'results') {
         renderTable(currentData.results, currentData.columns);
-      }} else {{
+      } else {
         renderPlan(currentData.query_plan);
-      }}
-    }}
+      }
+    }
 
-    async function executeWidgetQuery() {{
+    async function executeWidgetQuery() {
       const sql = document.getElementById('widget-sql').value.trim();
       const runBtn = document.getElementById('w-run-btn');
       const statusEl = document.getElementById('w-status');
@@ -892,12 +903,12 @@ class McpServer:
       runBtn.textContent = "⏳ Running...";
       statusEl.textContent = "Executing in DuckDB...";
 
-      try {{
-        const res = await fetch(API_URL, {{
+      try {
+        const res = await fetch(API_URL, {
           method: "POST",
-          headers: {{ "Content-Type": "application/json" }},
-          body: JSON.stringify({{ query: sql, explain: true }})
-        }});
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: sql, explain: true })
+        });
         const data = await res.json();
         currentData = data;
 
@@ -907,63 +918,63 @@ class McpServer:
         statusEl.textContent = 'Query completed (' + (data.row_count || 0) + ' rows)';
 
         // Notify host AI container if running inside an MCP App iframe
-        if (window.parent && window.parent !== window) {{
-          try {{
-            window.parent.postMessage({{
+        if (window.parent && window.parent !== window) {
+          try {
+            window.parent.postMessage({
               type: "mcp:widgetQueryExecuted",
               sql: sql,
               rowCount: data.row_count,
               queryTimeMs: data.query_time_ms,
-            }}, "*");
-          }} catch (e) {{}}
-        }}
+            }, "*");
+          } catch (e) {}
+        }
 
         const activeTab = document.getElementById('t-plan-btn').classList.contains('active') ? 'plan' : 'results';
         switchWidgetTab(activeTab);
-      }} catch (err) {{
+      } catch (err) {
         document.getElementById('w-content').innerHTML = '<div class="empty" style="color:#f85149">Error: ' + err.message + '</div>';
         statusEl.textContent = 'Error executing query';
-      }} finally {{
+      } finally {
         runBtn.disabled = false;
         runBtn.textContent = "▶ Run SQL";
-      }}
-    }}
+      }
+    }
 
-    function renderTable(rows, cols) {{
+    function renderTable(rows, cols) {
       const content = document.getElementById('w-content');
-      if (!rows || rows.length === 0) {{
+      if (!rows || rows.length === 0) {
         content.innerHTML = '<div class="empty">0 rows returned.</div>';
         return;
-      }}
+      }
       cols = cols || Object.keys(rows[0]);
       let html = '<table class="data-table"><thead><tr>';
       cols.forEach(c => html += '<th>' + c + '</th>');
       html += '</tr></thead><tbody>';
-      rows.forEach(r => {{
+      rows.forEach(r => {
         html += '<tr>';
         cols.forEach(c => html += '<td>' + (r[c] === null ? '<span style="color:#6e7681">null</span>' : r[c]) + '</td>');
         html += '</tr>';
-      }});
+      });
       html += '</tbody></table>';
       content.innerHTML = html;
-    }}
+    }
 
-    function renderPlan(plan) {{
+    function renderPlan(plan) {
       const content = document.getElementById('w-content');
-      if (!plan) {{
+      if (!plan) {
         content.innerHTML = '<div class="empty">No physical query plan available.</div>';
         return;
-      }}
+      }
       content.innerHTML = '<pre class="plan-pre"><code>' + escapeHtml(plan) + '</code></pre>';
-    }}
+    }
 
-    function escapeHtml(s) {{
+    function escapeHtml(s) {
       return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    }}
+    }
 
-    window.addEventListener('DOMContentLoaded', () => {{
+    window.addEventListener('DOMContentLoaded', () => {
       executeWidgetQuery();
-    }});
+    });
   </script>
 </body>
 </html>

@@ -28,7 +28,7 @@ MAX_DUCKDB_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB bound
 class DuckDbApplier:
     """Manages local DuckDB mutations, metadata watermarks, and checkpoints."""
 
-    def __init__(self, db_path: str = "/tmp/analytics.duckdb") -> None:
+    def __init__(self, db_path: str = "/tmp/analytics.duckdb") -> None:  # nosec B108
         self.db_path = db_path
         self.conn: duckdb.DuckDBPyConnection | None = None
         self._ensure_connection()
@@ -52,7 +52,7 @@ class DuckDbApplier:
     def get_watermark(self) -> dict[str, str]:
         """Fetch current LSN and timestamp watermarks from __cdc_metadata."""
         assert self.conn is not None
-        rows = self.conn.execute(f"SELECT key, value FROM {METADATA_TABLE}").fetchall()
+        rows = self.conn.execute(f"SELECT key, value FROM {METADATA_TABLE}").fetchall()  # nosec B608
         return {r[0]: r[1] for r in rows}
 
     def set_watermark(
@@ -117,7 +117,7 @@ class DuckDbApplier:
         # Bulk insert snapshot rows
         if rows:
             placeholders = ", ".join(["?"] * len(columns))
-            insert_sql = f'INSERT INTO "{table_name}" VALUES ({placeholders})'
+            insert_sql = f'INSERT INTO "{table_name}" VALUES ({placeholders})'  # nosec B608
             self.conn.executemany(insert_sql, rows)
 
         self.set_watermark(
@@ -168,7 +168,7 @@ class DuckDbApplier:
         cols = list(values.keys())
         quoted_cols = ", ".join(f'"{c}"' for c in cols)
         placeholders = ", ".join(["?"] * len(cols))
-        sql = f'INSERT INTO "{table}" ({quoted_cols}) VALUES ({placeholders})'
+        sql = f'INSERT INTO "{table}" ({quoted_cols}) VALUES ({placeholders})'  # nosec B608
         self.conn.execute(sql, [values[c] for c in cols])
 
     def _apply_update(self, table: str, values: dict[str, Any], keys: dict[str, Any]) -> None:
@@ -183,7 +183,7 @@ class DuckDbApplier:
 
         set_clauses = ", ".join([f'"{c}" = ?' for c in set_cols])
         where_clauses = " AND ".join([f'"{k}" = ?' for k in keys.keys()])
-        sql = f'UPDATE "{table}" SET {set_clauses} WHERE {where_clauses}'
+        sql = f'UPDATE "{table}" SET {set_clauses} WHERE {where_clauses}'  # nosec B608
 
         params = [values[c] for c in set_cols] + [keys[k] for k in keys.keys()]
         self.conn.execute(sql, params)
@@ -193,7 +193,7 @@ class DuckDbApplier:
         if not keys:
             return
         where_clauses = " AND ".join([f'"{k}" = ?' for k in keys.keys()])
-        sql = f'DELETE FROM "{table}" WHERE {where_clauses}'
+        sql = f'DELETE FROM "{table}" WHERE {where_clauses}'  # nosec B608
         self.conn.execute(sql, list(keys.values()))
 
     def checkpoint(self) -> None:

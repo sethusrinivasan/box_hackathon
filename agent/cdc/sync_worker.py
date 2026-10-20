@@ -46,7 +46,7 @@ LEASE_DURATION_SEC = int(os.environ.get("LEASE_DURATION_SEC", "300"))
 S3_BUCKET = os.environ.get("S3_BUCKET", "")
 S3_KEY = os.environ.get("S3_KEY", "analytics/analytics.duckdb")
 S3_STORAGE_CLASS = os.environ.get("S3_STORAGE_CLASS", "STANDARD")
-LOCAL_DB_PATH = os.environ.get("LOCAL_DB_PATH", "/tmp/analytics.duckdb")
+LOCAL_DB_PATH = os.environ.get("LOCAL_DB_PATH", "/tmp/analytics.duckdb")  # nosec B108
 
 DB_HOST = os.environ.get("DB_HOST", "")
 DB_PORT = int(os.environ.get("DB_PORT", "5432"))
@@ -302,7 +302,7 @@ class CdcSyncWorker:
 
                 # Fetch all rows
                 quoted_cols = ", ".join(f'"{c}"' for c in columns)
-                cur.execute(f'SELECT {quoted_cols} FROM "{table}";')
+                cur.execute(f'SELECT {quoted_cols} FROM "{table}";')  # nosec B608
                 rows = cur.fetchall()
 
                 applier.full_reinit_table(

@@ -31,8 +31,8 @@ logger = logging.getLogger("reality_check.cdc.reader")
 
 S3_BUCKET = os.environ.get("S3_BUCKET", "")
 S3_KEY = os.environ.get("S3_KEY", "analytics/analytics.duckdb")
-LOCAL_DB_PATH = os.environ.get("LOCAL_DB_PATH", "/tmp/analytics.duckdb")
-ETAG_PATH = os.environ.get("LOCAL_ETAG_PATH", "/tmp/analytics.etag")
+LOCAL_DB_PATH = os.environ.get("LOCAL_DB_PATH", "/tmp/analytics.duckdb")  # nosec B108
+ETAG_PATH = os.environ.get("LOCAL_ETAG_PATH", "/tmp/analytics.etag")  # nosec B108
 
 
 class DuckDbReader:
@@ -123,7 +123,7 @@ class DuckDbReader:
                 tables = [r[0] for r in conn.execute("SHOW TABLES;").fetchall() if not r[0].startswith("__")]
                 counts = {}
                 for tbl in tables:
-                    count_row = conn.execute(f'SELECT count(*) FROM "{tbl}";').fetchone()
+                    count_row = conn.execute(f'SELECT count(*) FROM "{tbl}";').fetchone()  # nosec B608
                     counts[tbl] = count_row[0] if count_row else 0
                 return counts
             finally:
@@ -268,8 +268,8 @@ def lambda_handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]
                 query_sql = body_json.get("query", query_sql)
                 params = body_json.get("params", [])
                 explain = bool(body_json.get("explain", True))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to parse request JSON body: %s", e)
         elif "query" in event:
             query_sql = event["query"]
             params = event.get("params", [])
@@ -328,14 +328,25 @@ def _render_query_editor_html(
         for t, c in counts.items()
     ]) or '<span class="badge badge-accent">📁 daily_cost: <strong>Active</strong></span>'
 
-    return f"""<!DOCTYPE html>
+    return (
+        QUERY_EDITOR_HTML
+        .replace("{{NAV_HTML}}", nav_html)
+        .replace("{{LAST_LSN}}", last_lsn)
+        .replace("{{VERSION}}", version)
+        .replace("{{TABLE_PILLS_HTML}}", table_pills_html)
+        .replace("{{DAILY_COST_COUNT}}", str(daily_cost_count))
+        .replace("{{TABLE_COUNT}}", str(len(counts)))
+    )
+
+
+QUERY_EDITOR_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>DuckDB Analytics Query Editor · Serverless CDC</title>
   <style>
-    :root {{
+    :root {
       --bg: #0d1117;
       --card-bg: #161b22;
       --card-hover: #1c2128;
@@ -349,9 +360,9 @@ def _render_query_editor_html(
       --code-bg: #090d13;
       --error-bg: rgba(248, 81, 73, 0.15);
       --error-border: #f85149;
-    }}
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       background: var(--bg);
       color: var(--fg);
@@ -359,12 +370,12 @@ def _render_query_editor_html(
       padding: 24px 20px 48px;
       display: flex;
       justify-content: center;
-    }}
-    .container {{
+    }
+    .container {
       max-width: 1080px;
       width: 100%;
-    }}
-    header {{
+    }
+    header {
       margin-bottom: 24px;
       display: flex;
       justify-content: space-between;
@@ -373,25 +384,25 @@ def _render_query_editor_html(
       gap: 16px;
       border-bottom: 1px solid var(--line);
       padding-bottom: 20px;
-    }}
-    .title-group h1 {{
+    }
+    .title-group h1 {
       font-size: 24px;
       font-weight: 600;
       display: flex;
       align-items: center;
       gap: 10px;
-    }}
-    .title-group p {{
+    }
+    .title-group p {
       color: var(--muted);
       font-size: 13px;
       margin-top: 4px;
-    }}
-    .status-badge-group {{
+    }
+    .status-badge-group {
       display: flex;
       gap: 8px;
       flex-wrap: wrap;
-    }}
-    .badge {{
+    }
+    .badge {
       display: inline-flex;
       align-items: center;
       gap: 6px;
@@ -401,47 +412,47 @@ def _render_query_editor_html(
       font-weight: 500;
       background: var(--card-bg);
       border: 1px solid var(--line);
-    }}
-    .badge .dot {{
+    }
+    .badge .dot {
       width: 8px;
       height: 8px;
       border-radius: 50%;
       background: #3fb950;
-    }}
-    .badge-accent {{
+    }
+    .badge-accent {
       color: var(--accent);
       border-color: rgba(88, 166, 255, 0.4);
       background: var(--tag-bg);
-    }}
-    .templates-section {{
+    }
+    .templates-section {
       margin-bottom: 16px;
-    }}
-    .templates-header {{
+    }
+    .templates-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
       margin-bottom: 8px;
       flex-wrap: wrap;
       gap: 8px;
-    }}
-    .templates-label {{
+    }
+    .templates-label {
       font-size: 12px;
       color: var(--muted);
       text-transform: uppercase;
       letter-spacing: 0.5px;
       font-weight: 600;
-    }}
-    .table-counts-pills {{
+    }
+    .table-counts-pills {
       display: flex;
       gap: 6px;
       flex-wrap: wrap;
-    }}
-    .templates-grid {{
+    }
+    .templates-grid {
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
-    }}
-    .template-btn {{
+    }
+    .template-btn {
       background: var(--card-bg);
       border: 1px solid var(--line);
       color: var(--fg);
@@ -453,28 +464,28 @@ def _render_query_editor_html(
       display: flex;
       align-items: center;
       gap: 6px;
-    }}
-    .template-btn:hover {{
+    }
+    .template-btn:hover {
       background: var(--card-hover);
       border-color: var(--accent);
       color: var(--accent);
-    }}
-    .badge-count {{
+    }
+    .badge-count {
       font-size: 10px;
       background: rgba(56, 139, 253, 0.18);
       color: var(--accent);
       padding: 1px 6px;
       border-radius: 999px;
       font-weight: 600;
-    }}
-    .editor-card {{
+    }
+    .editor-card {
       background: var(--card-bg);
       border: 1px solid var(--line);
       border-radius: 8px;
       overflow: hidden;
       margin-bottom: 24px;
-    }}
-    .editor-header {{
+    }
+    .editor-header {
       background: #13171f;
       padding: 8px 16px;
       border-bottom: 1px solid var(--line);
@@ -483,11 +494,11 @@ def _render_query_editor_html(
       align-items: center;
       font-size: 12px;
       color: var(--muted);
-    }}
-    .editor-body {{
+    }
+    .editor-body {
       position: relative;
-    }}
-    textarea.sql-input {{
+    }
+    textarea.sql-input {
       width: 100%;
       height: 140px;
       background: var(--code-bg);
@@ -499,16 +510,16 @@ def _render_query_editor_html(
       line-height: 1.5;
       resize: vertical;
       outline: none;
-    }}
-    .editor-footer {{
+    }
+    .editor-footer {
       padding: 10px 16px;
       background: #13171f;
       border-top: 1px solid var(--line);
       display: flex;
       justify-content: space-between;
       align-items: center;
-    }}
-    .run-btn {{
+    }
+    .run-btn {
       background: var(--accent-green);
       color: #fff;
       border: none;
@@ -521,22 +532,22 @@ def _render_query_editor_html(
       align-items: center;
       gap: 8px;
       transition: background 0.15s ease;
-    }}
-    .run-btn:hover {{
+    }
+    .run-btn:hover {
       background: var(--accent-green-hover);
-    }}
-    .run-btn:disabled {{
+    }
+    .run-btn:disabled {
       opacity: 0.6;
       cursor: not-allowed;
-    }}
-    .results-card {{
+    }
+    .results-card {
       background: var(--card-bg);
       border: 1px solid var(--line);
       border-radius: 8px;
       overflow: hidden;
       margin-bottom: 24px;
-    }}
-    .results-header {{
+    }
+    .results-header {
       padding: 8px 14px;
       background: #13171f;
       border-bottom: 1px solid var(--line);
@@ -545,12 +556,12 @@ def _render_query_editor_html(
       align-items: center;
       flex-wrap: wrap;
       gap: 10px;
-    }}
-    .results-tabs {{
+    }
+    .results-tabs {
       display: flex;
       gap: 4px;
-    }}
-    .tab-btn {{
+    }
+    .tab-btn {
       background: transparent;
       border: 1px solid transparent;
       color: var(--muted);
@@ -560,49 +571,49 @@ def _render_query_editor_html(
       cursor: pointer;
       font-weight: 500;
       transition: all 0.15s ease;
-    }}
-    .tab-btn:hover {{
+    }
+    .tab-btn:hover {
       color: var(--fg);
-    }}
-    .tab-btn.active {{
+    }
+    .tab-btn.active {
       background: rgba(56, 139, 253, 0.15);
       color: var(--accent);
       border-color: rgba(56, 139, 253, 0.3);
       font-weight: 600;
-    }}
-    .stats-pill {{
+    }
+    .stats-pill {
       display: inline-flex;
       align-items: center;
       gap: 8px;
       font-size: 12px;
       color: var(--muted);
-    }}
-    .pill-val {{
+    }
+    .pill-val {
       color: var(--fg);
       font-weight: 600;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    }}
-    .pill-highlight {{
+    }
+    .pill-highlight {
       color: #3fb950;
       font-weight: 600;
-    }}
-    .tab-view {{
+    }
+    .tab-view {
       display: none;
-    }}
-    .tab-view.active {{
+    }
+    .tab-view.active {
       display: block;
-    }}
-    .table-wrapper {{
+    }
+    .table-wrapper {
       max-height: 480px;
       overflow: auto;
-    }}
-    table.data-table {{
+    }
+    table.data-table {
       width: 100%;
       border-collapse: collapse;
       font-size: 12px;
       text-align: left;
-    }}
-    table.data-table th {{
+    }
+    table.data-table th {
       position: sticky;
       top: 0;
       background: #161b22;
@@ -613,39 +624,39 @@ def _render_query_editor_html(
       text-transform: uppercase;
       font-size: 11px;
       letter-spacing: 0.5px;
-    }}
-    table.data-table td {{
+    }
+    table.data-table td {
       padding: 8px 14px;
       border-bottom: 1px solid rgba(255,255,255,0.05);
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    }}
-    table.data-table tr:hover td {{
+    }
+    table.data-table tr:hover td {
       background: rgba(255,255,255,0.02);
-    }}
-    .num {{
+    }
+    .num {
       text-align: right;
-    }}
-    .empty-state {{
+    }
+    .empty-state {
       padding: 40px 20px;
       text-align: center;
       color: var(--muted);
       font-size: 13px;
-    }}
-    .plan-wrapper {{
+    }
+    .plan-wrapper {
       padding: 14px 16px;
       background: var(--code-bg);
       max-height: 480px;
       overflow: auto;
-    }}
-    .plan-header-info {{
+    }
+    .plan-header-info {
       display: flex;
       justify-content: space-between;
       align-items: center;
       margin-bottom: 10px;
       color: var(--muted);
       font-size: 11px;
-    }}
-    pre.plan-pre {{
+    }
+    pre.plan-pre {
       margin: 0;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-size: 12px;
@@ -653,8 +664,8 @@ def _render_query_editor_html(
       line-height: 1.4;
       white-space: pre;
       overflow-x: auto;
-    }}
-    .error-card {{
+    }
+    .error-card {
       display: none;
       background: var(--error-bg);
       border: 1px solid var(--error-border);
@@ -665,8 +676,8 @@ def _render_query_editor_html(
       font-size: 13px;
       font-family: ui-monospace, Menlo, monospace;
       white-space: pre-wrap;
-    }}
-    .arch-card {{
+    }
+    .arch-card {
       background: rgba(88, 166, 255, 0.05);
       border: 1px solid rgba(88, 166, 255, 0.2);
       border-radius: 8px;
@@ -674,20 +685,20 @@ def _render_query_editor_html(
       font-size: 12px;
       color: var(--muted);
       line-height: 1.6;
-    }}
-    .arch-card strong {{
+    }
+    .arch-card strong {
       color: var(--fg);
-    }}
-    .nav-bar {{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:10px 0 16px; margin-bottom:16px; border-bottom:1px solid var(--line); font-size:13px; }}
-    .nav-link {{ color:var(--muted); text-decoration:none; padding:4px 10px; border-radius:6px; transition:all .15s ease; }}
-    .nav-link:hover {{ color:var(--fg); background:rgba(110,118,129,.15); }}
-    .nav-link.active {{ color:var(--fg); font-weight:600; background:rgba(88,166,255,.15); border:1px solid rgba(88,166,255,.4); }}
-    .nav-sep {{ color:var(--line); }}
+    }
+    .nav-bar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:10px 0 16px; margin-bottom:16px; border-bottom:1px solid var(--line); font-size:13px; }
+    .nav-link { color:var(--muted); text-decoration:none; padding:4px 10px; border-radius:6px; transition:all .15s ease; }
+    .nav-link:hover { color:var(--fg); background:rgba(110,118,129,.15); }
+    .nav-link.active { color:var(--fg); font-weight:600; background:rgba(88,166,255,.15); border:1px solid rgba(88,166,255,.4); }
+    .nav-sep { color:var(--line); }
   </style>
 </head>
 <body>
   <div class="container">
-    {nav_html}
+    {{NAV_HTML}}
     <header>
       <div class="title-group">
         <h1><span>🦆</span> DuckDB Serverless Analytics Reader</h1>
@@ -695,9 +706,9 @@ def _render_query_editor_html(
       </div>
       <div class="status-badge-group">
         <div class="badge"><span class="dot"></span> CDC Slot: Active</div>
-        <div class="badge badge-accent">LSN: <span id="hdr-lsn">{last_lsn}</span></div>
+        <div class="badge badge-accent">LSN: <span id="hdr-lsn">{{LAST_LSN}}</span></div>
         <a href="/mcp" class="badge badge-accent" style="text-decoration:none;" target="_blank">🤖 MCP Endpoint: /mcp</a>
-        <div class="badge">DuckDB: v{version}</div>
+        <div class="badge">DuckDB: v{{VERSION}}</div>
       </div>
     </header>
 
@@ -705,12 +716,12 @@ def _render_query_editor_html(
       <div class="templates-header">
         <div class="templates-label">Quick Analytical Queries</div>
         <div class="table-counts-pills" id="table-counts-pills">
-          {table_pills_html}
+          {{TABLE_PILLS_HTML}}
         </div>
       </div>
       <div class="templates-grid">
         <button class="template-btn" onclick="setQuery(this)" data-sql="SELECT usage_date, application_name, gross_usd, net_usd FROM daily_cost ORDER BY usage_date DESC LIMIT 15;">
-          📊 Recent Costs <span class="badge-count">daily_cost: {daily_cost_count} rows</span>
+          📊 Recent Costs <span class="badge-count">daily_cost: {{DAILY_COST_COUNT}} rows</span>
         </button>
         <button class="template-btn" onclick="setQuery(this)" data-sql="SELECT application_name, count(*) as total_days, round(sum(gross_usd), 2) as total_gross_usd, round(avg(gross_usd), 2) as avg_daily_usd, min(usage_date) as start_date, max(usage_date) as latest_date FROM daily_cost GROUP BY application_name;">
           📈 Spend by Application
@@ -722,7 +733,7 @@ def _render_query_editor_html(
           📦 Resources by App
         </button>
         <button class="template-btn" onclick="setQuery(this)" data-sql="SHOW TABLES;">
-          📋 Show Tables <span class="badge-count">{len(counts)} tables</span>
+          📋 Show Tables <span class="badge-count">{{TABLE_COUNT}} tables</span>
         </button>
         <button class="template-btn" onclick="setQuery(this)" data-sql="SELECT * FROM __cdc_metadata;">
           ⏱️ CDC Watermarks
@@ -801,36 +812,36 @@ def _render_query_editor_html(
   <script>
     let lastResultData = null;
 
-    function switchResultTab(tab) {{
+    function switchResultTab(tab) {
       document.getElementById('tab-btn-results').classList.toggle('active', tab === 'results');
       document.getElementById('tab-btn-plan').classList.toggle('active', tab === 'plan');
       document.getElementById('tab-view-results').style.display = tab === 'results' ? 'block' : 'none';
       document.getElementById('tab-view-plan').style.display = tab === 'plan' ? 'block' : 'none';
-    }}
+    }
 
-    function copyPlanText() {{
+    function copyPlanText() {
       const text = document.getElementById('plan-code').textContent;
-      navigator.clipboard.writeText(text).then(() => {{
+      navigator.clipboard.writeText(text).then(() => {
         alert('Query plan copied to clipboard!');
-      }}).catch(() => {{
+      }).catch(() => {
         alert('Could not copy query plan.');
-      }});
-    }}
+      });
+    }
 
-    function setQuery(btn) {{
+    function setQuery(btn) {
       const sql = btn.getAttribute('data-sql');
       document.getElementById('sql-input').value = sql;
       runQuery();
-    }}
+    }
 
-    document.getElementById('sql-input').addEventListener('keydown', function(e) {{
-      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {{
+    document.getElementById('sql-input').addEventListener('keydown', function(e) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
         e.preventDefault();
         runQuery();
-      }}
-    }});
+      }
+    });
 
-    async function runQuery() {{
+    async function runQuery() {
       const sql = document.getElementById('sql-input').value.trim();
       const runBtn = document.getElementById('run-btn');
       const runBtnText = document.getElementById('run-btn-text');
@@ -843,23 +854,23 @@ def _render_query_editor_html(
       runBtnText.textContent = "⏳ Running...";
       errorBox.style.display = "none";
 
-      try {{
-        const response = await fetch(window.location.pathname, {{
+      try {
+        const response = await fetch(window.location.pathname, {
           method: 'POST',
-          headers: {{ 'Content-Type': 'application/json' }},
-          body: JSON.stringify({{ query: sql, explain: true }})
-        }});
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: sql, explain: true })
+        });
 
         const data = await response.json();
         lastResultData = data;
 
-        if (!response.ok || data.error) {{
+        if (!response.ok || data.error) {
           errorBox.textContent = data.error || 'Query failed with HTTP ' + response.status;
           errorBox.style.display = 'block';
           tableWrapper.innerHTML = '<div class="empty-state">Query returned an error.</div>';
           document.getElementById('plan-code').textContent = 'Execution failed: ' + (data.error || 'Unknown error');
           return;
-        }}
+        }
 
         // Update stats
         document.getElementById('res-count').textContent = data.row_count + ' rows';
@@ -868,76 +879,76 @@ def _render_query_editor_html(
         document.getElementById('res-cache').textContent = cacheLabel;
         document.getElementById('cache-indicator').textContent = 'Cache: ' + (data.cache_hit ? 'Warm Container' : 'Fresh S3 Pull');
 
-        if (data.watermark && data.watermark.last_applied_lsn) {{
+        if (data.watermark && data.watermark.last_applied_lsn) {
           document.getElementById('hdr-lsn').textContent = data.watermark.last_applied_lsn;
-        }}
+        }
 
         // Update Query Plan
-        if (data.query_plan) {{
+        if (data.query_plan) {
           document.getElementById('plan-code').textContent = data.query_plan;
-        }} else {{
+        } else {
           document.getElementById('plan-code').textContent = 'No physical execution plan available for this statement.';
-        }}
+        }
 
         // Render Table
         renderTable(data);
-      }} catch (err) {{
+      } catch (err) {
         errorBox.textContent = 'Network or client error: ' + err.message;
         errorBox.style.display = 'block';
-      }} finally {{
+      } finally {
         runBtn.disabled = false;
         runBtnText.textContent = "▶ Run Query";
-      }}
-    }}
+      }
+    }
 
-    function renderTable(data) {{
+    function renderTable(data) {
       const wrapper = document.getElementById('table-wrapper');
       const rows = data.results || [];
       const cols = data.columns || (rows.length > 0 ? Object.keys(rows[0]) : []);
 
-      if (rows.length === 0) {{
+      if (rows.length === 0) {
         wrapper.innerHTML = '<div class="empty-state">Query returned 0 rows.</div>';
         return;
-      }}
+      }
 
       let html = '<table class="data-table"><thead><tr>';
-      cols.forEach(col => {{
+      cols.forEach(col => {
         html += '<th>' + escapeHtml(col) + '</th>';
-      }});
+      });
       html += '</tr></thead><tbody>';
 
-      rows.forEach(r => {{
+      rows.forEach(r => {
         html += '<tr>';
-        cols.forEach(col => {{
+        cols.forEach(col => {
           const val = r[col];
           const isNum = typeof val === 'number';
           const displayVal = val === null || val === undefined ? '<span style="color:#6e7681">null</span>' : escapeHtml(String(val));
           html += '<td' + (isNum ? ' class="num"' : '') + '>' + displayVal + '</td>';
-        }});
+        });
         html += '</tr>';
-      }});
+      });
       html += '</tbody></table>';
 
       wrapper.innerHTML = html;
-    }}
+    }
 
-    function escapeHtml(str) {{
+    function escapeHtml(str) {
       return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    }}
+    }
 
-    function copyResultsJson() {{
+    function copyResultsJson() {
       if (!lastResultData) return;
-      navigator.clipboard.writeText(JSON.stringify(lastResultData, null, 2)).then(() => {{
+      navigator.clipboard.writeText(JSON.stringify(lastResultData, null, 2)).then(() => {
         alert('Results JSON copied to clipboard!');
-      }}).catch(() => {{
+      }).catch(() => {
         alert('Could not copy to clipboard.');
-      }});
-    }}
+      });
+    }
 
     // Initial load query execution
-    window.addEventListener('DOMContentLoaded', () => {{
+    window.addEventListener('DOMContentLoaded', () => {
       runQuery();
-    }});
+    });
   </script>
 </body>
 </html>

@@ -17,9 +17,14 @@ import json
 import os
 import shutil
 import struct
+import sys
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
 from botocore.exceptions import ClientError
 import duckdb
@@ -222,7 +227,7 @@ class TestDuckDbApplierAndValidator(unittest.TestCase):
 
     def test_validator_file_integrity_and_drift(self):
         # 1. Nonexistent file
-        v_missing = DuckDbValidator("/tmp/nonexistent_duckdb_test.duckdb")
+        v_missing = DuckDbValidator(os.path.join(tempfile.gettempdir(), "nonexistent_duckdb_test.duckdb"))
         self.assertFalse(v_missing.validate_file_integrity().is_valid)
 
         # 2. Valid file
