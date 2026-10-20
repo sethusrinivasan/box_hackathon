@@ -58,6 +58,7 @@ class LatencyTracker:
         self.cold_resume: bool = False
         self.tls_version: str | None = None
         self.tls_cipher: str | None = None
+        self.attempts: dict[str, Any] = {}
 
     def record(self, service: str, operation: str, duration_ms: float, **extra: Any) -> None:
         self.calls.append({
@@ -66,6 +67,12 @@ class LatencyTracker:
             "duration_ms": round(duration_ms, 1),
             **extra,
         })
+
+    def record_attempts(self, cold_attempt: dict[str, Any], warm_attempt: dict[str, Any]) -> None:
+        self.attempts = {
+            "cold_attempt": cold_attempt,
+            "warm_attempt": warm_attempt,
+        }
 
     def summary(self) -> dict[str, Any]:
         by_svc: dict[str, dict[str, Any]] = {}
@@ -120,4 +127,6 @@ class LatencyTracker:
             res["tls_version"] = self.tls_version
         if self.tls_cipher:
             res["tls_cipher"] = self.tls_cipher
+        if self.attempts:
+            res["attempts"] = self.attempts
         return res
