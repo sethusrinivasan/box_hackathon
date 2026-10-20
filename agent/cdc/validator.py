@@ -31,7 +31,7 @@ class DuckDbValidator:
     def __init__(self, db_path: str = "/tmp/analytics.duckdb") -> None:
         self.db_path = db_path
 
-    def validate_file_integrity(self) -> ValidationResult:
+    def validate_file_integrity(self, conn: Any | None = None) -> ValidationResult:
         """Check if file exists, opens cleanly, and has valid metadata."""
         if not os.path.exists(self.db_path):
             return ValidationResult(
@@ -45,8 +45,11 @@ class DuckDbValidator:
                 discrepancy_reason="DuckDB file is 0 bytes (corrupt or empty)",
             )
 
+        owns_conn = False
         try:
-            conn = duckdb.connect(self.db_path, read_only=True)
+            if conn is None:
+                conn = duckdb.connect(self.db_path, read_only=True)
+                owns_conn = True
             try:
                 # Check metadata table
                 tables = [r[0] for r in conn.execute("SHOW TABLES;").fetchall()]
@@ -97,7 +100,8 @@ class DuckDbValidator:
                     details={"tables": tables, "metadata": meta},
                 )
             finally:
-                conn.close()
+                if owns_conn:
+                    conn.close()
         except Exception as e:
             logger.warning("DuckDB corruption detected during validation: %s", e)
             return ValidationResult(
@@ -109,13 +113,18 @@ class DuckDbValidator:
         self,
         tables_to_check: list[str],
         pg_cursor: Any,
+        conn: Any | None = None,
     ) -> ValidationResult:
         """Compares row counts between DuckDB and source Aurora PostgreSQL."""
-        file_check = self.validate_file_integrity()
+        file_check = self.validate_file_integrity(conn=conn)
         if not file_check.is_valid:
             return file_check
 
-        conn = duckdb.connect(self.db_path, read_only=True)
+        owns_conn = False
+        if conn is None:
+            conn = duckdb.connect(self.db_path, read_only=True)
+            owns_conn = True
+
         try:
             for table in tables_to_check:
                 # DuckDB count
@@ -153,4 +162,5 @@ class DuckDbValidator:
 
             return ValidationResult(is_valid=True)
         finally:
-            conn.close()
+            if owns_conn:
+                conn.close()

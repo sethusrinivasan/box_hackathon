@@ -148,7 +148,7 @@ class CdcSyncWorker:
             # 2. Check if initial sync or full re-init is necessary
             needs_full_sync = force_reinit or not existed_in_s3
             if not needs_full_sync:
-                file_check = validator.validate_file_integrity()
+                file_check = validator.validate_file_integrity(conn=applier.conn)
                 if not file_check.is_valid:
                     logger.warning(
                         "Integrity validation failed (%s). Triggering full re-init.",
@@ -184,7 +184,7 @@ class CdcSyncWorker:
                     if not needs_full_sync:
                         # Check drift against Aurora
                         drift_check = validator.validate_drift_against_aurora(
-                            self.replicated_tables, cur
+                            self.replicated_tables, cur, conn=applier.conn
                         )
                         if not drift_check.is_valid:
                             logger.warning(
