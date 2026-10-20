@@ -46,7 +46,8 @@ def _request(method: str, path: str, body: dict | None = None):
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     start = time.perf_counter()
     try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+        # URL is the canary's own DEMO_URL env constant (https), not user input.
+        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:  # nosec B310
             raw = resp.read()
             return resp.status, raw, round((time.perf_counter() - start) * 1000, 1)
     except urllib.error.HTTPError as exc:
