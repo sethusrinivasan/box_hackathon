@@ -112,8 +112,33 @@ class DuckDbReader:
             logger.warning("Failed to read watermark: %s", e)
         return {}
 
-    def query(self, sql: str, params: list[Any] | None = None) -> dict[str, Any]:
-        """Execute analytical query against cached DuckDB replica."""
+    def get_table_counts(self) -> dict[str, int]:
+        """Fetch row count for each replicated user table in DuckDB."""
+        self.ensure_fresh_database()
+        if not os.path.exists(self.local_db_path):
+            return {}
+        try:
+            conn = duckdb.connect(self.local_db_path, read_only=True)
+            try:
+                tables = [r[0] for r in conn.execute("SHOW TABLES;").fetchall() if not r[0].startswith("__")]
+                counts = {}
+                for tbl in tables:
+                    count_row = conn.execute(f'SELECT count(*) FROM "{tbl}";').fetchone()
+                    counts[tbl] = count_row[0] if count_row else 0
+                return counts
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.warning("Failed to get table counts: %s", e)
+            return {}
+
+    def query(
+        self,
+        sql: str,
+        params: list[Any] | None = None,
+        explain: bool = True,
+    ) -> dict[str, Any]:
+        """Execute analytical query against cached DuckDB replica with optional query plan."""
         t0 = time.perf_counter()
         cache_hit = self.ensure_fresh_database()
 
@@ -128,6 +153,17 @@ class DuckDbReader:
             if "__cdc_metadata" in tables:
                 meta_rows = conn.execute("SELECT key, value FROM __cdc_metadata").fetchall()
                 watermark = {r[0]: r[1] for r in meta_rows}
+
+            # Optional: Physical query plan via EXPLAIN
+            query_plan: str | None = None
+            if explain:
+                try:
+                    stripped = sql.strip().upper()
+                    if stripped.startswith("SELECT") or stripped.startswith("WITH"):
+                        plan_rows = conn.execute(f"EXPLAIN {sql}", params or []).fetchall()
+                        query_plan = "\n".join(r[1] for r in plan_rows if len(r) > 1)
+                except Exception as ex:
+                    logger.debug("Explain plan generation skipped: %s", ex)
 
             # Execute caller query
             cursor = conn.execute(sql, params or [])
@@ -145,6 +181,7 @@ class DuckDbReader:
                 "row_count": len(results),
                 "query_time_ms": round(query_duration_ms, 2),
                 "cache_hit": cache_hit,
+                "query_plan": query_plan,
                 "watermark": watermark,
                 "duckdb_version": duckdb.__version__,
             }
@@ -184,9 +221,18 @@ def _method_path(event: dict[str, Any]) -> tuple[str, str]:
 
 
 def lambda_handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
-    """Lambda entry point supporting both Web UI query editor and JSON API."""
+    """Lambda entry point supporting Web UI query editor, JSON API, and MCP Server."""
     reader = DuckDbReader()
     method, path = _method_path(event)
+
+    domain_name = event.get("requestContext", {}).get("domainName", "")
+    base_url = f"https://{domain_name}" if domain_name else ""
+
+    # 0. MCP Server endpoint (/mcp, /mcp/sse, etc.)
+    if path == "/mcp" or path.startswith("/mcp/"):
+        from agent.cdc.mcp_server import McpServer
+        mcp = McpServer(reader=reader, server_base_url=base_url)
+        return mcp.handle_request(event)
 
     # 1. Health check
     if path == "/healthz":
@@ -197,11 +243,13 @@ def lambda_handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]
             "mode": "stateless-reader",
         })
 
-    # 2. Watermark API
+    # 2. Watermark API & Table Counts
     if path == "/api/watermark":
         watermark = reader.get_watermark()
+        table_counts = reader.get_table_counts()
         return _json_response(200, {
             "watermark": watermark,
+            "table_counts": table_counts,
             "s3_bucket": S3_BUCKET,
             "s3_key": S3_KEY,
             "duckdb_version": duckdb.__version__,
@@ -211,6 +259,7 @@ def lambda_handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]
     if method == "POST" or (isinstance(event, dict) and "query" in event and not event.get("rawPath")):
         query_sql = "SELECT * FROM daily_cost ORDER BY usage_date DESC LIMIT 10;"
         params: list[Any] = []
+        explain = True
 
         body = event.get("body")
         if body:
@@ -218,14 +267,16 @@ def lambda_handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]
                 body_json = json.loads(body) if isinstance(body, str) else body
                 query_sql = body_json.get("query", query_sql)
                 params = body_json.get("params", [])
+                explain = bool(body_json.get("explain", True))
             except Exception:
                 pass
         elif "query" in event:
             query_sql = event["query"]
             params = event.get("params", [])
+            explain = bool(event.get("explain", True))
 
         try:
-            response = reader.query(query_sql, params)
+            response = reader.query(query_sql, params, explain=explain)
             return _json_response(200, response)
         except Exception as e:
             logger.error("Query execution failed: %s", e, exc_info=True)
@@ -234,18 +285,30 @@ def lambda_handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]
     # 4. Web Query Editor Interface (GET /)
     if method in ("GET", "HEAD") and path in ("/", "/index.html"):
         watermark = reader.get_watermark()
-        body = "" if method == "HEAD" else _render_query_editor_html(watermark)
+        table_counts = reader.get_table_counts()
+        body = "" if method == "HEAD" else _render_query_editor_html(watermark, table_counts, base_url)
         return _html_response(200, body)
 
     return _json_response(404, {"error": f"Not found: {method} {path}"})
 
 
-def _render_query_editor_html(watermark: dict[str, Any]) -> str:
+def _render_query_editor_html(
+    watermark: dict[str, Any],
+    table_counts: dict[str, int] | None = None,
+    base_url: str = "",
+) -> str:
     """Render modern dark-themed interactive DuckDB query editor HTML."""
     last_lsn = html.escape(str(watermark.get("last_applied_lsn", "None")))
     last_commit = html.escape(str(watermark.get("last_commit_timestamp", "None")))
     sync_mode = html.escape(str(watermark.get("sync_mode", "UNKNOWN")))
     version = html.escape(duckdb.__version__)
+    counts = table_counts or {}
+    daily_cost_count = counts.get("daily_cost", 0)
+
+    table_pills_html = "".join([
+        f'<span class="badge badge-accent">📁 {html.escape(t)}: <strong>{c:,}</strong> records</span>'
+        for t, c in counts.items()
+    ]) or '<span class="badge badge-accent">📁 daily_cost: <strong>Active</strong></span>'
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -335,13 +398,25 @@ def _render_query_editor_html(watermark: dict[str, Any]) -> str:
     .templates-section {{
       margin-bottom: 16px;
     }}
+    .templates-header {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+      gap: 8px;
+    }}
     .templates-label {{
       font-size: 12px;
       color: var(--muted);
-      margin-bottom: 8px;
       text-transform: uppercase;
       letter-spacing: 0.5px;
       font-weight: 600;
+    }}
+    .table-counts-pills {{
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
     }}
     .templates-grid {{
       display: flex;
@@ -365,6 +440,14 @@ def _render_query_editor_html(watermark: dict[str, Any]) -> str:
       background: var(--card-hover);
       border-color: var(--accent);
       color: var(--accent);
+    }}
+    .badge-count {{
+      font-size: 10px;
+      background: rgba(56, 139, 253, 0.18);
+      color: var(--accent);
+      padding: 1px 6px;
+      border-radius: 999px;
+      font-weight: 600;
     }}
     .editor-card {{
       background: var(--card-bg);
@@ -436,7 +519,7 @@ def _render_query_editor_html(watermark: dict[str, Any]) -> str:
       margin-bottom: 24px;
     }}
     .results-header {{
-      padding: 10px 16px;
+      padding: 8px 14px;
       background: #13171f;
       border-bottom: 1px solid var(--line);
       display: flex;
@@ -444,6 +527,30 @@ def _render_query_editor_html(watermark: dict[str, Any]) -> str:
       align-items: center;
       flex-wrap: wrap;
       gap: 10px;
+    }}
+    .results-tabs {{
+      display: flex;
+      gap: 4px;
+    }}
+    .tab-btn {{
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--muted);
+      padding: 5px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      font-weight: 500;
+      transition: all 0.15s ease;
+    }}
+    .tab-btn:hover {{
+      color: var(--fg);
+    }}
+    .tab-btn.active {{
+      background: rgba(56, 139, 253, 0.15);
+      color: var(--accent);
+      border-color: rgba(56, 139, 253, 0.3);
+      font-weight: 600;
     }}
     .stats-pill {{
       display: inline-flex;
@@ -460,6 +567,12 @@ def _render_query_editor_html(watermark: dict[str, Any]) -> str:
     .pill-highlight {{
       color: #3fb950;
       font-weight: 600;
+    }}
+    .tab-view {{
+      display: none;
+    }}
+    .tab-view.active {{
+      display: block;
     }}
     .table-wrapper {{
       max-height: 480px;
@@ -500,6 +613,29 @@ def _render_query_editor_html(watermark: dict[str, Any]) -> str:
       color: var(--muted);
       font-size: 13px;
     }}
+    .plan-wrapper {{
+      padding: 14px 16px;
+      background: var(--code-bg);
+      max-height: 480px;
+      overflow: auto;
+    }}
+    .plan-header-info {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+      color: var(--muted);
+      font-size: 11px;
+    }}
+    pre.plan-pre {{
+      margin: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      color: #7ee787;
+      line-height: 1.4;
+      white-space: pre;
+      overflow-x: auto;
+    }}
     .error-card {{
       display: none;
       background: var(--error-bg);
@@ -536,21 +672,27 @@ def _render_query_editor_html(watermark: dict[str, Any]) -> str:
       <div class="status-badge-group">
         <div class="badge"><span class="dot"></span> CDC Slot: Active</div>
         <div class="badge badge-accent">LSN: <span id="hdr-lsn">{last_lsn}</span></div>
+        <a href="/mcp" class="badge badge-accent" style="text-decoration:none;" target="_blank">🤖 MCP Endpoint: /mcp</a>
         <div class="badge">DuckDB: v{version}</div>
       </div>
     </header>
 
     <div class="templates-section">
-      <div class="templates-label">Quick Analytical Queries</div>
+      <div class="templates-header">
+        <div class="templates-label">Quick Analytical Queries</div>
+        <div class="table-counts-pills" id="table-counts-pills">
+          {table_pills_html}
+        </div>
+      </div>
       <div class="templates-grid">
         <button class="template-btn" onclick="setQuery(this)" data-sql="SELECT usage_date, gross_usd, net_usd FROM daily_cost ORDER BY usage_date DESC LIMIT 15;">
-          📊 Recent Costs
+          📊 Recent Costs <span class="badge-count">daily_cost: {daily_cost_count} rows</span>
         </button>
         <button class="template-btn" onclick="setQuery(this)" data-sql="SELECT count(*) as total_days, round(sum(gross_usd), 2) as total_gross_usd, round(avg(gross_usd), 2) as avg_daily_usd, min(usage_date) as start_date, max(usage_date) as latest_date FROM daily_cost;">
           📈 Spend Aggregations
         </button>
         <button class="template-btn" onclick="setQuery(this)" data-sql="SHOW TABLES;">
-          🏷️ Show Tables
+          🏷️ Show Tables <span class="badge-count">{len(counts)} tables</span>
         </button>
         <button class="template-btn" onclick="setQuery(this)" data-sql="SELECT * FROM __cdc_metadata;">
           ⏱️ CDC Watermarks
@@ -581,22 +723,40 @@ def _render_query_editor_html(watermark: dict[str, Any]) -> str:
 
     <div class="results-card">
       <div class="results-header">
+        <div class="results-tabs">
+          <button id="tab-btn-results" class="tab-btn active" onclick="switchResultTab('results')">
+            📋 Results (<span id="res-count">0 rows</span>)
+          </button>
+          <button id="tab-btn-plan" class="tab-btn" onclick="switchResultTab('plan')">
+            🔍 Query Plan (EXPLAIN)
+          </button>
+        </div>
         <div class="stats-pill">
-          <span>Results:</span>
-          <span class="pill-val" id="res-count">0 rows</span>
-          <span>·</span>
           <span>Latency:</span>
           <span class="pill-val pill-highlight" id="res-latency">0 ms</span>
           <span>·</span>
           <span>Source:</span>
           <span class="pill-val" id="res-cache">—</span>
+          <button class="template-btn" style="padding:4px 8px; font-size:11px; margin-left:8px;" onclick="copyResultsJson()">
+            📋 Copy JSON
+          </button>
         </div>
-        <button class="template-btn" style="padding:4px 8px; font-size:11px" onclick="copyResultsJson()">
-          📋 Copy JSON
-        </button>
       </div>
-      <div class="table-wrapper" id="table-wrapper">
-        <div class="empty-state">Click "Run Query" or press Ctrl+Enter to execute.</div>
+
+      <div id="tab-view-results" class="tab-view active">
+        <div class="table-wrapper" id="table-wrapper">
+          <div class="empty-state">Click "Run Query" or press Ctrl+Enter to execute.</div>
+        </div>
+      </div>
+
+      <div id="tab-view-plan" class="tab-view">
+        <div class="plan-wrapper">
+          <div class="plan-header-info">
+            <span>DuckDB Physical Execution Plan (AST & Columnar Operators)</span>
+            <button class="template-btn" style="padding:2px 8px; font-size:11px;" onclick="copyPlanText()">📋 Copy Plan</button>
+          </div>
+          <pre class="plan-pre"><code id="plan-code">Run a SELECT query to view its physical execution plan.</code></pre>
+        </div>
       </div>
     </div>
 
@@ -604,11 +764,28 @@ def _render_query_editor_html(watermark: dict[str, Any]) -> str:
       <strong>Zero Aurora Read Load Guarantee:</strong> Every analytical query runs directly in-process
       inside this AWS Lambda instance against the local columnar DuckDB replica. If the S3 ETag matches,
       queries complete in <strong>&lt; 1 ms</strong> with zero byte transfers and zero Aurora connections.
+      AI agents can connect via Model Context Protocol at <code>/mcp</code>.
     </div>
   </div>
 
   <script>
     let lastResultData = null;
+
+    function switchResultTab(tab) {{
+      document.getElementById('tab-btn-results').classList.toggle('active', tab === 'results');
+      document.getElementById('tab-btn-plan').classList.toggle('active', tab === 'plan');
+      document.getElementById('tab-view-results').style.display = tab === 'results' ? 'block' : 'none';
+      document.getElementById('tab-view-plan').style.display = tab === 'plan' ? 'block' : 'none';
+    }}
+
+    function copyPlanText() {{
+      const text = document.getElementById('plan-code').textContent;
+      navigator.clipboard.writeText(text).then(() => {{
+        alert('Query plan copied to clipboard!');
+      }}).catch(() => {{
+        alert('Could not copy query plan.');
+      }});
+    }}
 
     function setQuery(btn) {{
       const sql = btn.getAttribute('data-sql');
@@ -640,7 +817,7 @@ def _render_query_editor_html(watermark: dict[str, Any]) -> str:
         const response = await fetch(window.location.pathname, {{
           method: 'POST',
           headers: {{ 'Content-Type': 'application/json' }},
-          body: JSON.stringify({{ query: sql }})
+          body: JSON.stringify({{ query: sql, explain: true }})
         }});
 
         const data = await response.json();
@@ -650,6 +827,7 @@ def _render_query_editor_html(watermark: dict[str, Any]) -> str:
           errorBox.textContent = data.error || 'Query failed with HTTP ' + response.status;
           errorBox.style.display = 'block';
           tableWrapper.innerHTML = '<div class="empty-state">Query returned an error.</div>';
+          document.getElementById('plan-code').textContent = 'Execution failed: ' + (data.error || 'Unknown error');
           return;
         }}
 
@@ -662,6 +840,13 @@ def _render_query_editor_html(watermark: dict[str, Any]) -> str:
 
         if (data.watermark && data.watermark.last_applied_lsn) {{
           document.getElementById('hdr-lsn').textContent = data.watermark.last_applied_lsn;
+        }}
+
+        // Update Query Plan
+        if (data.query_plan) {{
+          document.getElementById('plan-code').textContent = data.query_plan;
+        }} else {{
+          document.getElementById('plan-code').textContent = 'No physical execution plan available for this statement.';
         }}
 
         // Render Table

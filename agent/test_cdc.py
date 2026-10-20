@@ -451,7 +451,13 @@ class TestDuckDbReader(unittest.TestCase):
         self.assertEqual(res["results"][0]["count"], 2)
         self.assertAlmostEqual(res["results"][0]["total_usd"], 40.0)
         self.assertEqual(res["watermark"]["last_applied_lsn"], "3000")
+        self.assertIsNotNone(res.get("query_plan"))
+        self.assertIn("SEQ_SCAN", res["query_plan"])
         mock_s3.download_file.assert_not_called()  # Verified zero download on hit!
+
+        # Table counts
+        counts = reader.get_table_counts()
+        self.assertEqual(counts.get("daily_cost"), 2)
 
     def test_reader_web_html_interface(self):
         from agent.cdc.reader import lambda_handler
@@ -461,6 +467,9 @@ class TestDuckDbReader(unittest.TestCase):
                 "last_applied_lsn": "4500",
                 "last_commit_timestamp": "2026-10-19T20:00:00Z",
                 "sync_mode": "INCREMENTAL",
+            }
+            mock_inst.get_table_counts.return_value = {
+                "daily_cost": 25,
             }
             mock_reader_cls.return_value = mock_inst
 
@@ -474,6 +483,9 @@ class TestDuckDbReader(unittest.TestCase):
             self.assertIn("DuckDB Serverless Analytics Reader", res["body"])
             self.assertIn("SQL Query (DuckDB dialect)", res["body"])
             self.assertIn("4500", res["body"])
+            self.assertIn("daily_cost: <strong>25</strong> records", res["body"])
+            self.assertIn("Query Plan (EXPLAIN)", res["body"])
+            self.assertIn("/mcp", res["body"])
 
     def test_reader_api_query_post_and_healthz(self):
         from agent.cdc.reader import lambda_handler
@@ -522,6 +534,124 @@ class TestDuckDbReader(unittest.TestCase):
             res = lambda_handler(event, None)
             self.assertEqual(res["statusCode"], 500)
             self.assertIn("Syntax error", res["body"])
+
+
+class TestMcpServer(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, "mcp.duckdb")
+
+        applier = DuckDbApplier(self.db_path)
+        applier.full_reinit_table(
+            table_name="daily_cost",
+            columns=["usage_date", "gross_usd"],
+            column_types=["DATE", "DOUBLE"],
+            rows=[("2026-10-18", 12.0), ("2026-10-19", 18.0)],
+            snapshot_lsn=5000,
+        )
+        applier.close()
+
+        self.reader = DuckDbReader(local_db_path=self.db_path)
+        from agent.cdc.mcp_server import McpServer
+        self.mcp = McpServer(reader=self.reader, server_base_url="https://test.lambda-url.us-east-2.on.aws")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_mcp_initialize(self):
+        req = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05"},
+        }
+        res = self.mcp._handle_single_rpc(req)
+        self.assertEqual(res["id"], 1)
+        self.assertEqual(res["result"]["protocolVersion"], "2024-11-05")
+        self.assertIn("tools", res["result"]["capabilities"])
+        self.assertIn("io.modelcontextprotocol/ui", res["result"]["capabilities"]["extensions"])
+        self.assertIn("mcp-ui", res["result"]["capabilities"]["extensions"])
+
+    def test_mcp_tools_list_has_ui_extension_metadata(self):
+        req = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+        res = self.mcp._handle_single_rpc(req)
+        tools = res["result"]["tools"]
+        tool_names = [t["name"] for t in tools]
+        self.assertIn("query_duckdb", tool_names)
+        self.assertIn("get_table_counts", tool_names)
+        self.assertIn("get_cdc_watermark", tool_names)
+
+        # Check UI extension metadata on query_duckdb
+        query_tool = next(t for t in tools if t["name"] == "query_duckdb")
+        self.assertIn("_meta", query_tool)
+        self.assertEqual(query_tool["_meta"]["ui"]["resourceUri"], "ui://realitycheck/query-widget")
+
+    def test_mcp_tools_call_query_duckdb_returns_widget(self):
+        req = {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "query_duckdb",
+                "arguments": {
+                    "query": "SELECT count(*) as count, sum(gross_usd) as total FROM daily_cost;",
+                    "explain": True,
+                },
+            },
+        }
+        res = self.mcp._handle_single_rpc(req)
+        self.assertEqual(res["id"], 3)
+        content = res["result"]["content"]
+        self.assertEqual(len(content), 2)
+
+        # 1. Text content with Markdown table & EXPLAIN plan
+        text_item = content[0]
+        self.assertEqual(text_item["type"], "text")
+        self.assertIn("DuckDB Query Execution Results", text_item["text"])
+        self.assertIn("Physical Query Execution Plan", text_item["text"])
+
+        # 2. In-place UI Widget Resource
+        widget_item = content[1]
+        self.assertEqual(widget_item["type"], "resource")
+        self.assertEqual(widget_item["resource"]["uri"], "ui://realitycheck/query-widget")
+        self.assertIn("<!DOCTYPE html>", widget_item["resource"]["text"])
+        self.assertIn("DuckDB In-Place Analytics", widget_item["resource"]["text"])
+
+        # Meta UI link
+        self.assertEqual(res["result"]["_meta"]["ui"]["resourceUri"], "ui://realitycheck/query-widget")
+
+    def test_mcp_resources_read_widget_html(self):
+        req = {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "resources/read",
+            "params": {"uri": "ui://realitycheck/query-widget"},
+        }
+        res = self.mcp._handle_single_rpc(req)
+        contents = res["result"]["contents"]
+        self.assertEqual(len(contents), 1)
+        self.assertEqual(contents[0]["uri"], "ui://realitycheck/query-widget")
+        self.assertEqual(contents[0]["mimeType"], "text/html")
+        self.assertIn("executeWidgetQuery", contents[0]["text"])
+
+    def test_mcp_http_get_and_options(self):
+        # 1. GET /mcp with JSON manifest
+        event_get = {
+            "requestContext": {"http": {"method": "GET", "path": "/mcp"}},
+            "headers": {"accept": "application/json"},
+        }
+        res_get = self.mcp.handle_request(event_get)
+        self.assertEqual(res_get["statusCode"], 200)
+        manifest = json.loads(res_get["body"])
+        self.assertEqual(manifest["protocolVersion"], "2024-11-05")
+
+        # 2. OPTIONS /mcp for CORS
+        event_opt = {
+            "requestContext": {"http": {"method": "OPTIONS", "path": "/mcp"}},
+        }
+        res_opt = self.mcp.handle_request(event_opt)
+        self.assertEqual(res_opt["statusCode"], 204)
+        self.assertEqual(res_opt["headers"]["Access-Control-Allow-Origin"], "*")
 
 
 if __name__ == "__main__":
