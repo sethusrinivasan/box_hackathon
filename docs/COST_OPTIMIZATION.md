@@ -80,3 +80,26 @@ On 2026-11-16 (~17 hours into the day), empirical verification in AWS Cost Explo
    - Ten polyglot microservice Lambdas (`observability-python-app`, `observability-go-app`, etc.) have their `POSTGRES_HOST` configured to the `reality-check-cost-tracker` cluster.
    - These 1-minute connection pulses occasionally wake Aurora or delay auto-pause. Disabling this rule or unsetting `POSTGRES_HOST` on the demo canary will allow Aurora to sleep ~23.5 hours/day, reaching the full <$0.10/day goal.
 
+---
+
+## 6. Observability-Demo Lakehouse Audit Architecture & Account Retention Policies
+
+To support the valid canary audit use case without keeping Aurora awake 24/7, a Two-Tier Lakehouse Architecture was implemented in [`observability-demo`](https://github.com/sethusrinivasan/observability-demo) (commit `1692354`):
+
+1. **Tier 1 (Cheap Store Ingest):**
+   - Microservices emit audit events asynchronously to the OTel Collector (`/v1/logs`).
+   - The compactor buffers logs and writes columnar Snappy Parquet files to S3 (`$0.023/GB/month`, < $0.0001/mo for audit logs).
+   - Synchronous direct PostgreSQL connections from the 10 microservices are removed (`POSTGRES_HOST = ""`).
+
+2. **Tier 2 (PostgreSQL Relational Serving):**
+   - Scheduled daily at **06:15 UTC** (nested between daily cost collection at 06:00 UTC and CDC replication at 06:30 UTC).
+   - An in-process DuckDB engine (`canary/audit_ingest.py`) reads Parquet files from S3/local storage in-memory.
+   - Computes vectorized rollups: `audit_log_hourly_summary` (traffic, success/error counts, p95 latency), `audit_dimensions` (MD5 dimension deduplication), and `audit_anomalies` (4xx/5xx exceptions and slow requests).
+   - Bulk upserts all insights into Aurora in a single transaction (< 2 seconds), allowing Aurora to return to `0.000 ACU` for ~23.5 hours/day.
+
+3. **Retention Policies Audited and Enforced:**
+   - **CloudWatch Logs:** Explicit 3-day retention policy applied to all 11 `observability-*` Lambda log groups (previously set to `Never Expire` with ~80 MB accumulated).
+   - **S3 Bucket Lifecycles:** Active lifecycle configurations applied across all buckets (`observability-demo-telemetry-lake-*`, `realitycheckcdc-*`, `realitycheckwebdemo-*`): Standard-IA at 30 days, Glacier at 90 days, 365-day expiration, and 1-day abort incomplete multipart uploads.
+   - **Local Docker Parity:** Fully testable offline in `docker-compose.yaml` with local S3Mock and PostgreSQL (`pytest tests/test_audit_ingest.py` 100% pass).
+
+
