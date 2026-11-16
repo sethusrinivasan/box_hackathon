@@ -183,13 +183,12 @@ def _connect(tracker: LatencyTracker | None = None) -> psycopg.Connection:
                     tracker.record("Amazon Aurora PostgreSQL", "psycopg:connect [TCP connect]", phases["tcp_ms"])
                 tracker.record("Amazon Aurora PostgreSQL", f"psycopg:connect [TLS handshake - {tls_ver}]", phases["tls_ms"])
                 tracker.record("Amazon Aurora PostgreSQL", "psycopg:connect [Server IAM auth]", phases["auth_ms"])
-            emit_metric("DbConnectLatencyMs", round(elapsed_ms, 1), "Milliseconds",
-                        fn="web")
-            emit_metric("DbColdResume", 1 if is_cold else 0, "Count", fn="web")
+            emit_metric("DbConnectLatencyMs", round(elapsed_ms, 1), "Milliseconds")
+            emit_metric("DbColdResume", 1 if is_cold else 0, "Count")
             return conn
         except psycopg.OperationalError as exc:
             last_exc = exc  # likely Aurora still resuming; retry once
-    emit_metric("DbConnectFailure", 1, "Count", fn="web")
+    emit_metric("DbConnectFailure", 1, "Count")
     raise last_exc  # type: ignore[misc]
 
 

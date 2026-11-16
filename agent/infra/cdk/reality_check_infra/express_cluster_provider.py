@@ -65,6 +65,11 @@ def _on_create(cluster_id: str) -> dict:
         DBClusterIdentifier=cluster_id,
         Engine="aurora-postgresql",
         WithExpressConfiguration=True,
+        ServerlessV2ScalingConfiguration={
+            "MinCapacity": 0.0,
+            "MaxCapacity": 1.0,
+            "SecondsUntilAutoPause": 300,
+        },
         EnableCloudwatchLogsExports=_LOG_EXPORTS,
         Tags=_TAGS,
     )
@@ -80,16 +85,24 @@ def _on_create(cluster_id: str) -> dict:
 
 
 def _ensure_log_exports(c: dict) -> None:
-    """Enable any supported CloudWatch log export not already on. Idempotent —
-    lets a redeploy bring an already-existing cluster up to the desired state."""
+    """Enable any supported CloudWatch log export not already on, and ensure
+    auto-pause 0 ACU scaling is configured. Idempotent."""
     enabled = set(c.get("EnabledCloudwatchLogsExports") or [])
     to_enable = [t for t in _LOG_EXPORTS if t not in enabled]
+    scaling = c.get("ServerlessV2ScalingConfiguration") or {}
+    needs_scaling = scaling.get("MinCapacity") != 0.0 or scaling.get("MaxCapacity", 4.0) > 1.0
+
+    kwargs = {"DBClusterIdentifier": c["DBClusterIdentifier"]}
     if to_enable:
-        rds.modify_db_cluster(
-            DBClusterIdentifier=c["DBClusterIdentifier"],
-            CloudwatchLogsExportConfiguration={"EnableLogTypes": to_enable},
-            ApplyImmediately=True,
-        )
+        kwargs["CloudwatchLogsExportConfiguration"] = {"EnableLogTypes": to_enable}
+    if needs_scaling:
+        kwargs["ServerlessV2ScalingConfiguration"] = {
+            "MinCapacity": 0.0,
+            "MaxCapacity": 1.0,
+            "SecondsUntilAutoPause": 300,
+        }
+    if to_enable or needs_scaling:
+        rds.modify_db_cluster(ApplyImmediately=True, **kwargs)
 
 
 def _current(cluster_id: str) -> dict:

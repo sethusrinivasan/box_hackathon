@@ -163,16 +163,39 @@ def free_tier_usage() -> list[dict]:
     return rows
 
 
+def _ce_harvest_totals(start: str, end: str) -> tuple[float, float, float, float]:
+    """Fetch gross (Usage), credit, net UnblendedCost, and net NetUnblendedCost in
+    ONE single Cost Explorer API call instead of 4 separate calls ($0.01 vs $0.04)."""
+    res = _ce_client().get_cost_and_usage(
+        TimePeriod={"Start": start, "End": end},
+        Granularity="MONTHLY" if _span_days(start, end) > 1 else "DAILY",
+        Metrics=["UnblendedCost", "NetUnblendedCost"],
+        GroupBy=[{"Type": "DIMENSION", "Key": "RECORD_TYPE"}],
+    )
+    gross = 0.0
+    credit = 0.0
+    net_unblended = 0.0
+    for period in res.get("ResultsByTime", []):
+        for group in period.get("Groups", []):
+            rt = group.get("Keys", [""])[0]
+            unblended = float(group.get("Metrics", {}).get("UnblendedCost", {}).get("Amount", 0.0))
+            net_unbl = float(group.get("Metrics", {}).get("NetUnblendedCost", {}).get("Amount", 0.0))
+            if rt == "Usage":
+                gross += unblended
+            elif rt == "Credit":
+                credit += unblended
+            net_unblended += net_unbl
+    net = gross + credit
+    return gross, credit, net, net_unblended
+
+
 def harvest(day_start: str, day_end: str, avg_daily_gross: float) -> dict:
     """Pull every billing source for a day and compute the credit projection.
 
     avg_daily_gross is passed in by the caller (computed from the stored
     history) so this module needs no DB access.
     """
-    gross = _ce_total(day_start, day_end, record_type="Usage")
-    credit = _ce_total(day_start, day_end, record_type="Credit")
-    net = _ce_total(day_start, day_end)  # usage + credits combined
-    net_unblended = _ce_total(day_start, day_end, metric="NetUnblendedCost")
+    gross, credit, net, net_unblended = _ce_harvest_totals(day_start, day_end)
 
     plan = account_plan()
     projection = credit_projection(

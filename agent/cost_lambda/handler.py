@@ -172,14 +172,12 @@ def _connect() -> psycopg.Connection:
                 connect_timeout=20,
             )
             elapsed_ms = (time.perf_counter() - started) * 1000
-            emit_metric("DbConnectLatencyMs", round(elapsed_ms, 1), "Milliseconds",
-                        fn="collector")
-            emit_metric("DbColdResume", 1 if attempt > 0 else 0, "Count",
-                        fn="collector")
+            emit_metric("DbConnectLatencyMs", round(elapsed_ms, 1), "Milliseconds")
+            emit_metric("DbColdResume", 1 if attempt > 0 else 0, "Count")
             return conn
         except psycopg.OperationalError as exc:
             last_exc = exc  # Aurora likely still resuming; retry once
-    emit_metric("DbConnectFailure", 1, "Count", fn="collector")
+    emit_metric("DbConnectFailure", 1, "Count")
     raise last_exc  # type: ignore[misc]
 
 

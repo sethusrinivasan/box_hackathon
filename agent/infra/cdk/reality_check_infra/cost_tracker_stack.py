@@ -300,24 +300,20 @@ class CostTrackerStack(Stack):
         )
         collector.grant_invoke(sched_role)
 
-        # Twice daily at 06:00 and 18:00 UTC. The 06:00 run lands after the prior
-        # UTC day has closed in Cost Explorer; the 18:00 run re-collects the same
-        # day to pick up CE's settling revisions (usage posts a few days late) and
-        # refreshes the credit balance + resource inventory intra-day. The upsert
-        # is idempotent on usage_date, so the second run overwrites with fresher
-        # numbers rather than duplicating.
+        # Frugal: Once daily at 06:00 UTC after the prior UTC day has closed in
+        # Cost Explorer. Eliminates redundant CE API queries.
         scheduler.CfnSchedule(
             self, "DailyCostSchedule",
             flexible_time_window=scheduler.CfnSchedule.FlexibleTimeWindowProperty(
                 mode="FLEXIBLE", maximum_window_in_minutes=60,
             ),
-            schedule_expression="cron(0 6,18 * * ? *)",
+            schedule_expression="cron(0 6 * * ? *)",
             target=scheduler.CfnSchedule.TargetProperty(
                 arn=collector.function_arn,
                 role_arn=sched_role.role_arn,
                 input='{"source":"scheduled"}',
             ),
-            description="Reality Check cost + credit + inventory collection (06:00 & 18:00 UTC).",
+            description="Reality Check cost + credit + inventory collection (once daily at 06:00 UTC).",
             state="ENABLED",
         )
 

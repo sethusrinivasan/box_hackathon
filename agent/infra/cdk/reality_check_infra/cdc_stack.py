@@ -165,19 +165,21 @@ class CdcStack(Stack):
         )
         sync_worker.grant_invoke(sched_role)
 
+        # Frugal: Once daily at 06:30 UTC (30 minutes after cost collector runs).
+        # Eliminates 288 DB wakeups per day, allowing Aurora Serverless v2 to auto-pause to 0 ACU.
         scheduler.CfnSchedule(
             self,
             "CdcSyncSchedule",
             flexible_time_window=scheduler.CfnSchedule.FlexibleTimeWindowProperty(
                 mode="OFF"
             ),
-            schedule_expression=f"rate({sync_schedule_minutes} minutes)",
+            schedule_expression="cron(30 6 * * ? *)",
             target=scheduler.CfnSchedule.TargetProperty(
                 arn=sync_worker.function_arn,
                 role_arn=sched_role.role_arn,
                 input='{"source":"eventbridge.cdc"}',
             ),
-            description=f"CDC incremental sync every {sync_schedule_minutes} minutes.",
+            description="CDC incremental sync once daily at 06:30 UTC post-collection.",
             state="ENABLED",
         )
 

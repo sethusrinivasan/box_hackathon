@@ -623,20 +623,20 @@ class ObservabilityStack(Stack):
             )
         )
 
-        # Alarm if DuckDB CDC replication lag exceeds 15 minutes (3 sync intervals)
+        # Alarm if DuckDB CDC replication lag exceeds 24 hours (daily sync window)
         alarms.append(
             cw.Alarm(
                 self,
                 "CdcReplicationLagAlarm",
                 alarm_name=f"{dashboard_name}-CdcReplicationLag",
                 alarm_description=(
-                    "DuckDB CDC pipeline replication lag from Aurora exceeds 15 minutes, "
+                    "DuckDB CDC pipeline replication lag from Aurora exceeds 24 hours, "
                     "indicating sync worker delays or lock contention."
                 ),
                 metric=self._cdc_metric("ReplicationLagSeconds", stat="Maximum").with_(
-                    period=Duration.minutes(5)),
-                threshold=900,
-                evaluation_periods=3,
+                    period=Duration.hours(1)),
+                threshold=86400,
+                evaluation_periods=1,
                 comparison_operator=cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
                 treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
             )
