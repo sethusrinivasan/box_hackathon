@@ -65,3 +65,18 @@ To safeguard against catastrophic data loss in AWS, a complete Disaster Recovery
 - **Local Restoration:** `dr/docker-compose.yml` runs a standalone PostgreSQL 16 container with `pgvector` on port 5433.
 - **Automated Verification:** `dr/verify_dr.sh` spins up the container, runs `dr/restore_parquet_to_postgres.py`, verifies row counts and financial totals ($46.2690 gross), and tears down the container.
 - **Zero-Cloud Dependency:** Database state can be inspected or recovered entirely offline.
+
+---
+
+## 5. Day 1 Verification & External Canary Discovery
+
+On 2026-11-16 (~17 hours into the day), empirical verification in AWS Cost Explorer and CloudWatch showed:
+1. **Gross Spend:** Dropped to **$0.4585** vs **$1.39** expected at this time under the old $1.96/day baseline (**67% immediate reduction**).
+2. **Cost Explorer API & CloudWatch:** Both down to **$0.0400** each (down from $0.12 and $0.32/day).
+3. **Auto-Pause Verified:** Aurora Serverless v2 reached `0.000 ACU` for multiple periods, confirming cold resume functionality.
+4. **External Canary Discovery:**
+   - Aurora PostgreSQL logs showed recurring SSL connection attempts: `could not accept SSL connection: EOF detected`.
+   - Investigation revealed a separate project stack (`Observability-Demo`) in the same AWS account running an EventBridge rule `observability-canary-1min-pulse` (`rate(1 minute)`).
+   - Ten polyglot microservice Lambdas (`observability-python-app`, `observability-go-app`, etc.) have their `POSTGRES_HOST` configured to the `reality-check-cost-tracker` cluster.
+   - These 1-minute connection pulses occasionally wake Aurora or delay auto-pause. Disabling this rule or unsetting `POSTGRES_HOST` on the demo canary will allow Aurora to sleep ~23.5 hours/day, reaching the full <$0.10/day goal.
+
