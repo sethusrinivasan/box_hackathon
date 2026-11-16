@@ -185,6 +185,7 @@ agent/check_config.py     preflight for Box + Bedrock
 agent/envload.py          .env loader
 agent/minipdf.py          dependency-free PDF writer (report + demo docs)
 agent/infra/cdk/          CDK: web demo, observability, canary, cost-tracker, & CDC stacks
+dr/                       disaster recovery: Parquet backups & local Docker Compose PostgreSQL restore
 box/box_client.py         Box API wrapper (boxsdk v10, CCG)
 docs/contracts, evidence  demo docs (Markdown source)
 docs/box_upload/          the same docs as PDFs, ready to upload to Box
@@ -244,6 +245,8 @@ Tests: `python3 agent/test_local_agent.py` and `python3 agent/test_check_config.
 ## Security & docs
 
 - [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) — components, request flow, trust boundaries.
+- [`docs/COST_OPTIMIZATION.md`](./docs/COST_OPTIMIZATION.md) — 90% cloud cost reduction & burn rate analysis.
+- [`dr/README.md`](./dr/README.md) — disaster recovery Parquet backups and local restore runbook.
 - [`docs/SECURITY.md`](./docs/SECURITY.md) — threat model mapped to OWASP Top 10:2025.
 - [`docs/DOC_AUDIT.md`](./docs/DOC_AUDIT.md) — documentation audit.
 - [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md) — tracked limitations & workarounds (KI-1: express-config IaC gap).

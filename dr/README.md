@@ -11,7 +11,7 @@ If AWS resources are accidentally terminated or inaccessible, the entire databas
 ```
 dr/
 ├── data/
-│   ├── daily_cost.parquet          # 29 daily cost snapshots (compressed ZSTD)
+│   ├── daily_cost.parquet          # 30 daily cost snapshots with change logs (compressed ZSTD)
 │   ├── resource_inventory.parquet  # 72 active cloud resources
 │   ├── __cdc_metadata.parquet      # CDC LSN & watermark replication metadata
 │   └── manifest.json               # Export timestamps, row counts, checksums

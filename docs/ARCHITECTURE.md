@@ -20,7 +20,10 @@ the whole pipeline is demoable without any cloud dependency.
 | **Box integration** | `box/box_client.py` | Box API + Box AI wrapper (CCG auth). |
 | **Offline source** | `box/local_source.py` | Duck-typed stand-in reading `data/contracts/manifest.json`. `get_source()` picks Box iff credentials are set. |
 | **Telemetry** | `box/telemetry.py` | Dependency-free structured logging, latency timing, and EMF metrics across the three trust boundaries + workflow KPIs. Opt-in via `LOG_LEVEL` / `EMIT_METRICS`. |
-| **Infra (CDK)** | `agent/infra/cdk/` | Python CDK app: CloudWatch observability dashboard + baseline alarms over the `RealityCheck` metric namespace. |
+| **Cost Tracker** | `agent/cost_lambda/` | Daily cost & credit collection into Aurora Serverless v2 PostgreSQL (IAM-auth) and public web view. |
+| **CDC Replication** | `agent/cdc/` | Serverless CDC engine syncing Aurora to DuckDB in S3 with interactive reader and MCP server. |
+| **Disaster Recovery** | `dr/` | Parquet database snapshots and local Docker Compose PostgreSQL 16 + pgvector restoration suite. |
+| **Infra (CDK)** | `agent/infra/cdk/` | 5 CDK stacks: WebDemo, Observability, Canary, CostTracker, and Cdc. |
 | **Data model + fixtures** | `data/` | `catalog.py` (reference data + `RISK_LIBRARY`), `risk_signals.py`, `minipdf.py` (dependency-free PDF writer), 100 synthetic contract PDFs. |
 | **Demo** | `demo.py` | Narrated end-to-end walkthrough. |
 
