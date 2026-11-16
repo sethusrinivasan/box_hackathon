@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS daily_cost (
     credits_consumed_usd  numeric(14,2),
     credits_expiry        date,
     projection            jsonb,
+    change_details        text,
+    change_url            text,
     collected_at          timestamptz   NOT NULL DEFAULT now()
 );
 

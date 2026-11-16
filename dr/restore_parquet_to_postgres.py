@@ -55,6 +55,8 @@ CREATE TABLE IF NOT EXISTS daily_cost (
     credits_consumed_usd  numeric(14,2),
     credits_expiry        date,
     projection            jsonb,
+    change_details        text,
+    change_url            text,
     collected_at          timestamptz   NOT NULL DEFAULT now()
 );
 
@@ -99,7 +101,7 @@ def restore_daily_cost(conn: psycopg.Connection, parquet_path: str) -> int:
             for json_field in ("services", "gross_services", "applications", "gross_applications", "projection"):
                 val = row_dict.get(json_field)
                 if val is not None and not isinstance(val, str):
-                    row_dict[json_field] = json.dumps(val)
+                    row_dict[json_field] = json.dumps(val, default=str)
 
             cur.execute(
                 """
@@ -107,13 +109,14 @@ def restore_daily_cost(conn: psycopg.Connection, parquet_path: str) -> int:
                     usage_date, application_name, unblended_usd, blended_usd, net_usd,
                     currency, services, gross_usd, credit_usd, gross_services,
                     plan_type, credits_granted_usd, credits_remaining_usd, credits_consumed_usd,
-                    credits_expiry, projection, applications, gross_applications, collected_at
+                    credits_expiry, projection, applications, gross_applications,
+                    change_details, change_url, collected_at
                 ) VALUES (
                     %(usage_date)s, %(application_name)s, %(unblended_usd)s, %(blended_usd)s, %(net_usd)s,
                     %(currency)s, %(services)s::jsonb, %(gross_usd)s, %(credit_usd)s, %(gross_services)s::jsonb,
                     %(plan_type)s, %(credits_granted_usd)s, %(credits_remaining_usd)s, %(credits_consumed_usd)s,
                     %(credits_expiry)s, %(projection)s::jsonb, %(applications)s::jsonb, %(gross_applications)s::jsonb,
-                    %(collected_at)s
+                    %(change_details)s, %(change_url)s, %(collected_at)s
                 )
                 ON CONFLICT (usage_date) DO UPDATE SET
                     gross_usd = EXCLUDED.gross_usd,
@@ -122,6 +125,8 @@ def restore_daily_cost(conn: psycopg.Connection, parquet_path: str) -> int:
                     gross_services = EXCLUDED.gross_services,
                     applications = EXCLUDED.applications,
                     gross_applications = EXCLUDED.gross_applications,
+                    change_details = EXCLUDED.change_details,
+                    change_url = EXCLUDED.change_url,
                     collected_at = EXCLUDED.collected_at;
                 """,
                 row_dict,
@@ -147,7 +152,7 @@ def restore_resource_inventory(conn: psycopg.Connection, parquet_path: str) -> i
             row_dict = dict(zip(cols, r))
             val = row_dict.get("tags")
             if val is not None and not isinstance(val, str):
-                row_dict["tags"] = json.dumps(val)
+                row_dict["tags"] = json.dumps(val, default=str)
 
             cur.execute(
                 """

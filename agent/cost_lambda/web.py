@@ -271,7 +271,8 @@ def _fetch_costs() -> dict:
                 "       credits_remaining_usd, credits_consumed_usd, "
                 "       credits_granted_usd, credits_expiry, projection, "
                 "       COALESCE(application_name, 'RealityChecker'), "
-                "       COALESCE(gross_applications, applications) "
+                "       COALESCE(gross_applications, applications), "
+                "       change_details, change_url "
                 "FROM daily_cost WHERE usage_date >= %s ORDER BY usage_date DESC;"
             )
             t0 = time.perf_counter()
@@ -279,7 +280,7 @@ def _fetch_costs() -> dict:
                 cur.execute(query_sql, (cutoff,))
                 raw_rows = cur.fetchall()
             except Exception:
-                # Fallback if application_name columns are not yet queried
+                # Fallback if change columns or application_name columns are not yet queried
                 fallback_sql = (
                     "SELECT usage_date, gross_usd, net_usd, currency, "
                     "       COALESCE(gross_services, services), plan_type, "
@@ -320,6 +321,8 @@ def _fetch_costs() -> dict:
                 projection = row[10]
                 app_name = row[11] if len(row) > 11 and row[11] else "RealityChecker"
                 app_costs = row[12] if len(row) > 12 and row[12] else None
+                change_details = row[13] if len(row) > 13 and row[13] else None
+                change_url = row[14] if len(row) > 14 and row[14] else None
                 if not app_costs and _f(gross) > 0:
                     app_costs = {app_name: _f(gross)}
 
@@ -331,6 +334,8 @@ def _fetch_costs() -> dict:
                     "currency": cur_code,
                     "services": services or {},
                     "applications": app_costs or {app_name: _f(gross)},
+                    "change_details": change_details,
+                    "change_url": change_url,
                 })
                 # First (latest) row carries the current credit snapshot.
                 if not credit:
@@ -566,6 +571,25 @@ def _render(data: dict) -> str:
         for a in data.get("top_applications", [])
     ) or "<tr><td colspan='5' class='muted'>No application tagged spend in this window.</td></tr>"
 
+    def _render_change(r):
+        details = r.get("change_details")
+        url = r.get("change_url")
+        if not details and not url:
+            return "<span class='muted'>—</span>"
+        if url and details:
+            return (
+                f"<a href='{esc(url)}' target='_blank' rel='noopener noreferrer' "
+                f"style='color:var(--accent); text-decoration:none; display:inline-flex; align-items:center; gap:5px; font-weight:500'>"
+                f"<span>{esc(details)}</span> "
+                f"<svg width='11' height='11' viewBox='0 0 16 16' fill='currentColor' style='opacity:0.7; flex-shrink:0'>"
+                f"<path d='M3.75 2h3.5a.75.75 0 0 1 0 1.5H4.5v9h9v-2.75a.75.75 0 0 1 1.5 0v3.5A1.25 1.25 0 0 1 13.75 14H3.75A1.25 1.25 0 0 1 2.5 12.75V3.25A1.25 1.25 0 0 1 3.75 2z'/>"
+                f"<path d='M10.25 1.5a.75.75 0 0 1 .75-.75h4.25c.414 0 .75.336.75.75v4.25a.75.75 0 0 1-1.5 0V3.56l-5.72 5.72a.75.75 0 0 1-1.06-1.06l5.72-5.72H11a.75.75 0 0 1-.75-.75z'/>"
+                f"</svg></a>"
+            )
+        if url and not details:
+            return f"<a href='{esc(url)}' target='_blank' rel='noopener noreferrer' style='color:var(--accent)'>{esc(url)}</a>"
+        return f"<span style='color:var(--fg)'>{esc(details)}</span>"
+
     rows = "".join(
         f"<tr><td>{esc(r['date'])}</td>"
         f"<td><span style='font-size:12px; font-weight:500; color:var(--accent); background:rgba(88,166,255,0.1); padding:2px 6px; border-radius:4px'>{esc(r.get('application_name', 'RealityChecker'))}</span></td>"
@@ -577,9 +601,10 @@ def _render(data: dict) -> str:
         f"<span>${r['gross_usd']:.4f}</span>"
         f"</div>"
         f"</td>"
-        f"<td class='num'>${r['net_usd']:.4f}</td></tr>"
+        f"<td class='num'>${r['net_usd']:.4f}</td>"
+        f"<td style='max-width:380px; font-size:12px'>{_render_change(r)}</td></tr>"
         for r in data.get("daily", [])
-    ) or "<tr><td colspan='4' class='muted'>No cost data recorded yet.</td></tr>"
+    ) or "<tr><td colspan='5' class='muted'>No cost data recorded yet.</td></tr>"
 
     svc_rows = "".join(
         f"<tr><td>{esc(s['service'])}</td>"
@@ -835,7 +860,7 @@ def _render(data: dict) -> str:
 
   <h3>Daily history</h3>
   <table><thead><tr><th>Date (UTC)</th><th>ApplicationName</th><th class="num">Gross</th>
-  <th class="num">Net</th></tr></thead><tbody>{rows}</tbody></table>
+  <th class="num">Net</th><th>Changes / Deployments</th></tr></thead><tbody>{rows}</tbody></table>
 
   {breakdown_html}
 

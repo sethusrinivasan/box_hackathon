@@ -273,6 +273,48 @@ def test_web_routes():
     assert res_404["statusCode"] == 404
 
 
+def test_render_includes_changes_column():
+    mock_data = {
+        "window_days": 30,
+        "days_recorded": 2,
+        "window_gross_usd": 1.25,
+        "window_net_usd": 0.0,
+        "currency": "USD",
+        "resource_count": 10,
+        "daily": [
+            {
+                "date": "2026-11-15",
+                "application_name": "RealityChecker",
+                "gross_usd": 0.97,
+                "net_usd": 0.0,
+                "currency": "USD",
+                "services": {},
+                "change_details": "Option A Cost Optimization: CDC schedule 1x/day",
+                "change_url": "https://github.com/sethusrinivasan/box_hackathon/commit/09b574a",
+            },
+            {
+                "date": "2026-11-14",
+                "application_name": "RealityChecker",
+                "gross_usd": 1.95,
+                "net_usd": 0.0,
+                "currency": "USD",
+                "services": {},
+                "change_details": None,
+                "change_url": None,
+            },
+        ],
+        "top_applications": [],
+        "top_services": [],
+        "latency_breakdown": {},
+    }
+    html = web._render(mock_data)
+    assert "<th>Changes / Deployments</th>" in html
+    assert "Option A Cost Optimization: CDC schedule 1x/day" in html
+    assert "https://github.com/sethusrinivasan/box_hackathon/commit/09b574a" in html
+    assert "target='_blank'" in html
+    assert "<span class='muted'>—</span>" in html
+
+
 if __name__ == "__main__":
     test_latency_tracker_summary()
     print("PASS test_latency_tracker_summary")
@@ -280,6 +322,8 @@ if __name__ == "__main__":
     print("PASS test_latency_tracker_cold_resume_flag")
     test_render_includes_latency_breakdown()
     print("PASS test_render_includes_latency_breakdown")
+    test_render_includes_changes_column()
+    print("PASS test_render_includes_changes_column")
     test_sparkline_svg_rendering()
     print("PASS test_sparkline_svg_rendering")
     test_fetch_costs_mocked()
@@ -288,4 +332,4 @@ if __name__ == "__main__":
     print("PASS test_fetch_costs_cold_resume_runs_twice_and_probes_warm")
     test_web_routes()
     print("PASS test_web_routes")
-    print("\n7 passed, 0 failed")
+    print("\n8 passed, 0 failed")
