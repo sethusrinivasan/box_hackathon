@@ -1,0 +1,20 @@
+{
+  "export_timestamp": "2026-11-16T03:25:45.073171+00:00",
+  "tables": {
+    "daily_cost": {
+      "file": "daily_cost.parquet",
+      "row_count": 29,
+      "size_bytes": 9728
+    },
+    "resource_inventory": {
+      "file": "resource_inventory.parquet",
+      "row_count": 72,
+      "size_bytes": 6387
+    },
+    "__cdc_metadata": {
+      "file": "__cdc_metadata.parquet",
+      "row_count": 4,
+      "size_bytes": 672
+    }
+  }
+}

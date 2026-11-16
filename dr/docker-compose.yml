@@ -1,0 +1,21 @@
+services:
+  dr_postgres:
+    image: pgvector/pgvector:pg16
+    container_name: reality_check_dr_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+    ports:
+      - "${DR_PG_PORT:-5433}:5432"
+    volumes:
+      - dr_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  dr_pgdata:

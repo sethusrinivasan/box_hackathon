@@ -457,7 +457,7 @@ class TestDuckDbReader(unittest.TestCase):
         self.assertAlmostEqual(res["results"][0]["total_usd"], 40.0)
         self.assertEqual(res["watermark"]["last_applied_lsn"], "3000")
         self.assertIsNotNone(res.get("query_plan"))
-        self.assertIn("SEQ_SCAN", res["query_plan"])
+        self.assertIn("SEQ SCAN", res["query_plan"].upper())
         mock_s3.download_file.assert_not_called()  # Verified zero download on hit!
 
         # Table counts
